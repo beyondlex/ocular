@@ -44,8 +44,15 @@ Your App ──→ Ocular Proxy (16379) ──→ Redis (6379)
 
 ## Quick Start
 
+### Install
+
 ```bash
-# Build
+curl -fsSL https://raw.githubusercontent.com/lex/ocular/main/install.sh | sh
+```
+
+### Build from source
+
+```bash
 cargo build --release
 ```
 
