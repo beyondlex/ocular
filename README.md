@@ -66,6 +66,22 @@ listen = "127.0.0.1:13306"
 remote = "127.0.0.1:3306"
 ```
 
+Multiple instances of the same protocol are supported — just use different names and ports:
+
+```toml
+[[proxy]]
+name = "redis-cache"
+protocol = "redis"
+listen = "127.0.0.1:16379"
+remote = "127.0.0.1:6379"
+
+[[proxy]]
+name = "redis-session"
+protocol = "redis"
+listen = "127.0.0.1:16380"
+remote = "127.0.0.1:6380"
+```
+
 ```bash
 # Run
 ./target/release/ocular
