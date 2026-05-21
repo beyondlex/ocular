@@ -19,7 +19,13 @@ listen = "127.0.0.1:16379"   # Your app connects here
 remote = "127.0.0.1:6379"    # Real Redis address
 
 [[proxy]]
-name = "mysql"
+name = "mysql-local"
 protocol = "mysql"
 listen = "127.0.0.1:13306"   # Your app connects here
 remote = "127.0.0.1:3306"    # Real MySQL address
+
+[[proxy]]
+name = "mysql-dev-media"
+protocol = "mysql"
+listen = "127.0.0.1:13306"   # Your app connects here
+remote = "mall-mysql-dev.cpass.net:3306"    # Real Redis address

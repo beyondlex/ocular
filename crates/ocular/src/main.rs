@@ -24,10 +24,23 @@ pub struct ProxyConfig {
 }
 
 fn load_config() -> Result<Config> {
-    let path = PathBuf::from("ocular.toml");
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    toml::from_str(&content).context("failed to parse config")
+    let candidates = [
+        // 1. Current directory
+        Some(PathBuf::from("ocular.toml")),
+        // 2. XDG_CONFIG_HOME/ocular/ocular.toml
+        std::env::var("XDG_CONFIG_HOME").ok().map(|d| PathBuf::from(d).join("ocular/ocular.toml")),
+        // 3. ~/.config/ocular/ocular.toml
+        dirs::config_dir().map(|d| d.join("ocular/ocular.toml")),
+    ];
+    for candidate in candidates.iter().flatten() {
+        if candidate.exists() {
+            let content = std::fs::read_to_string(candidate)
+                .with_context(|| format!("failed to read {}", candidate.display()))?;
+            info!(config = %candidate.display(), "loaded config");
+            return toml::from_str(&content).context("failed to parse config");
+        }
+    }
+    anyhow::bail!("config not found. Create ocular.toml in current directory or ~/.config/ocular/ocular.toml")
 }
 
 fn init_tracing() {
