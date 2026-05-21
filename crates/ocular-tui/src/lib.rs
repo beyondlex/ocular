@@ -30,6 +30,7 @@ struct App {
     components: Vec<ComponentInfo>,
     component_idx: Option<usize>, // None = all, Some(i) = filter by component i
     filter: String,
+    pending_keys: String, // for number + gg jumps
 }
 
 impl App {
@@ -70,6 +71,7 @@ pub async fn run(
         components,
         component_idx: None,
         filter: String::new(),
+        pending_keys: String::new(),
     };
 
     loop {
@@ -101,9 +103,11 @@ pub async fn run(
                 match key.code {
                     KeyCode::Char('q') => break,
                     KeyCode::Char('/') => {
+                        app.pending_keys.clear();
                         app.focus = Focus::Filter;
                     }
                     KeyCode::Esc => {
+                        app.pending_keys.clear();
                         if !app.filter.is_empty() {
                             app.filter.clear();
                         } else {
@@ -113,6 +117,7 @@ pub async fn run(
                         app.focus = Focus::Events;
                     }
                     KeyCode::Tab => {
+                        app.pending_keys.clear();
                         app.focus = match app.focus {
                             Focus::Components => Focus::Events,
                             Focus::Events => Focus::Detail,
@@ -122,6 +127,7 @@ pub async fn run(
                         app.detail_scroll = 0;
                     }
                     KeyCode::BackTab => {
+                        app.pending_keys.clear();
                         app.focus = match app.focus {
                             Focus::Components => Focus::Detail,
                             Focus::Events => Focus::Components,
@@ -130,46 +136,78 @@ pub async fn run(
                         };
                         app.detail_scroll = 0;
                     }
-                    KeyCode::Up | KeyCode::Char('k') => match app.focus {
-                        Focus::Components => {
-                            app.component_idx = match app.component_idx {
-                                None => Some(app.components.len().saturating_sub(1)),
-                                Some(0) => None,
-                                Some(i) => Some(i - 1),
-                            };
-                            app.selected = 0;
-                        }
-                        Focus::Events => { app.selected = app.selected.saturating_sub(1); app.detail_scroll = 0; }
-                        Focus::Detail => { app.detail_scroll = app.detail_scroll.saturating_sub(1); }
-                        _ => {}
-                    },
-                    KeyCode::Down | KeyCode::Char('j') => match app.focus {
-                        Focus::Components => {
-                            app.component_idx = match app.component_idx {
-                                None => { if !app.components.is_empty() { Some(0) } else { None } }
-                                Some(i) => {
-                                    if i + 1 < app.components.len() { Some(i + 1) } else { None }
-                                }
-                            };
-                            app.selected = 0;
-                        }
-                        Focus::Events => {
+                    KeyCode::Char('G') if app.focus == Focus::Events => {
+                        app.pending_keys.clear();
+                        let max = app.filtered_events().len().saturating_sub(1);
+                        app.selected = max;
+                        app.detail_scroll = 0;
+                    }
+                    KeyCode::Char('g') if app.focus == Focus::Events => {
+                        if app.pending_keys.ends_with('g') {
+                            // gg or Ngg
+                            let num_str: String = app.pending_keys.chars().take_while(|c| c.is_ascii_digit()).collect();
                             let max = app.filtered_events().len().saturating_sub(1);
-                            if app.selected < max {
-                                app.selected += 1;
-                                app.detail_scroll = 0;
+                            if num_str.is_empty() {
+                                app.selected = 0; // gg = go to first
+                            } else if let Ok(n) = num_str.parse::<usize>() {
+                                app.selected = n.saturating_sub(1).min(max); // Ngg = go to line N
                             }
+                            app.pending_keys.clear();
+                            app.detail_scroll = 0;
+                        } else {
+                            app.pending_keys.push('g');
                         }
-                        Focus::Detail => { app.detail_scroll += 1; }
-                        _ => {}
-                    },
+                    }
+                    KeyCode::Char(c @ '0'..='9') if app.focus == Focus::Events => {
+                        app.pending_keys.push(c);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.pending_keys.clear();
+                        match app.focus {
+                            Focus::Components => {
+                                app.component_idx = match app.component_idx {
+                                    None => Some(app.components.len().saturating_sub(1)),
+                                    Some(0) => None,
+                                    Some(i) => Some(i - 1),
+                                };
+                                app.selected = 0;
+                            }
+                            Focus::Events => { app.selected = app.selected.saturating_sub(1); app.detail_scroll = 0; }
+                            Focus::Detail => { app.detail_scroll = app.detail_scroll.saturating_sub(1); }
+                            _ => {}
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.pending_keys.clear();
+                        match app.focus {
+                            Focus::Components => {
+                                app.component_idx = match app.component_idx {
+                                    None => { if !app.components.is_empty() { Some(0) } else { None } }
+                                    Some(i) => {
+                                        if i + 1 < app.components.len() { Some(i + 1) } else { None }
+                                    }
+                                };
+                                app.selected = 0;
+                            }
+                            Focus::Events => {
+                                let max = app.filtered_events().len().saturating_sub(1);
+                                if app.selected < max {
+                                    app.selected += 1;
+                                    app.detail_scroll = 0;
+                                }
+                            }
+                            Focus::Detail => { app.detail_scroll += 1; }
+                            _ => {}
+                        }
+                    }
                     KeyCode::Enter => {
+                        app.pending_keys.clear();
                         if app.focus == Focus::Components {
                             app.focus = Focus::Events;
                             app.selected = 0;
                         }
                     }
-                    _ => {}
+                    _ => { app.pending_keys.clear(); }
                 }
             }
         }
@@ -284,7 +322,7 @@ fn ui(f: &mut Frame, app: &App) {
             };
             let time = format_time(&ev.timestamp);
             let lat = ev.latency.as_ref().map(|d| format!(" ({})", format_latency(d))).unwrap_or_default();
-            let line = format!(" {} {} [{}] {}{}", time, arrow, ev.component, ev.summary, lat);
+            let line = format!(" {:>5} {} {} [{}] {}{}", idx + 1, time, arrow, ev.component, ev.summary, lat);
             let style = if idx == app.selected {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else {
