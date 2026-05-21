@@ -22,8 +22,12 @@ Your App ──→ Ocular Proxy (16379) ──→ Redis (6379)
 - **Protocol parsing** — human-readable commands instead of raw bytes
 - **Latency tracking** — request→response timing for every operation
 - **Filtering** — search by component name or keyword (`/` to activate)
-- **Detail inspector** — select any event to see full payload
+- **Component selection** — focus on a single middleware in the left panel
+- **Detail inspector** — select any event to see full payload (scrollable)
+- **MySQL ResultSet display** — parsed columns and rows instead of binary
+- **Auto SSL stripping** — MySQL connections work without `--ssl-mode=DISABLED`
 - **Local timezone** — timestamps match your system clock
+- **Vim-style navigation** — `gg`, `G`, `Ngg` line jumps
 - **Language agnostic** — works with Java, Rust, Go, Python, anything
 
 ## Supported Protocols
@@ -31,7 +35,7 @@ Your App ──→ Ocular Proxy (16379) ──→ Redis (6379)
 | Protocol | Status |
 |----------|--------|
 | Redis (RESP) | ✅ |
-| MySQL | Planned |
+| MySQL | ✅ |
 | RabbitMQ (AMQP) | Planned |
 | Elasticsearch (HTTP) | Planned |
 
@@ -51,25 +55,37 @@ name = "redis"
 protocol = "redis"
 listen = "127.0.0.1:16379"
 remote = "127.0.0.1:6379"
+
+[[proxy]]
+name = "mysql"
+protocol = "mysql"
+listen = "127.0.0.1:13306"
+remote = "127.0.0.1:3306"
 ```
 
 ```bash
 # Run
 ./target/release/ocular
 
-# Connect your app to localhost:16379 instead of 6379
-redis-cli -p 16379
+# Connect your app to the proxy ports
+redis-cli -h 127.0.0.1 -p 16379
+mysql -h 127.0.0.1 -P 13306 -u root -p
 ```
+
+> **Note:** For MySQL, use `-h 127.0.0.1` (not `localhost`) to ensure TCP connection through the proxy.
 
 ## Keybindings
 
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Navigate events / scroll detail |
-| `Tab` | Switch focus between Events and Detail panels |
-| `/` | Enter filter mode |
-| `Enter` | Confirm filter |
-| `Esc` | Clear filter |
+| `gg` | Jump to first event |
+| `G` | Jump to last event |
+| `Ngg` | Jump to event N (e.g. `42gg`) |
+| `Tab` / `Shift+Tab` | Cycle focus: Components → Events → Detail |
+| `/` | Enter filter mode (match component or command) |
+| `Enter` | Confirm filter / select component |
+| `Esc` | Clear filter or component selection |
 | `q` | Quit |
 
 ## Architecture
@@ -77,7 +93,7 @@ redis-cli -p 16379
 ```
 crates/
 ├── ocular/            # Binary entry point, config loading
-├── ocular-protocol/   # Wire protocol parsers (RESP, ...)
+├── ocular-protocol/   # Wire protocol parsers (RESP, MySQL)
 ├── ocular-proxy/      # Async TCP proxy with event broadcasting
 └── ocular-tui/        # Terminal UI (ratatui)
 ```
