@@ -10,5 +10,6 @@ anyhow.workspace = true
 tokio.workspace = true
 serde.workspace = true
 chrono = "0.4"
+sqlformat = "0.2"
 ocular-proxy = { path = "../ocular-proxy" }
 ocular-protocol = { path = "../ocular-protocol" }

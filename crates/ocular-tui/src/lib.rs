@@ -298,6 +298,14 @@ fn format_time(ts: &std::time::SystemTime) -> String {
     dt.format("%H:%M:%S%.3f").to_string()
 }
 
+fn format_sql(sql: &str) -> String {
+    sqlformat::format(sql, &sqlformat::QueryParams::None, sqlformat::FormatOptions {
+        indent: sqlformat::Indent::Spaces(2),
+        uppercase: true,
+        lines_between_queries: 1,
+    })
+}
+
 fn format_latency(d: &Duration) -> String {
     let us = d.as_micros();
     if us < 1000 {
@@ -409,8 +417,13 @@ fn ui(f: &mut Frame, app: &mut App) {
     let detail_focused = app.focus == Focus::Detail;
     let selected_event = filtered.get(app.selected).map(|(_, ev)| *ev);
     let detail = if let Some(ev) = selected_event {
-        format!("Command:   {}\nResponse:  {}\nLatency:   {}\nTime:      {}\nComponent: {}\n\n{}",
-            ev.full_command, ev.response, format_latency(&ev.latency),
+        let formatted_cmd = if ev.protocol == ocular_protocol::Protocol::Mysql {
+            format_sql(&ev.full_command)
+        } else {
+            ev.full_command.clone()
+        };
+        format!("Command:\n{}\n\nResponse:  {}\nLatency:   {}\nTime:      {}\nComponent: {}\n\n{}",
+            formatted_cmd, ev.response, format_latency(&ev.latency),
             format_time(&ev.timestamp), ev.component, ev.response_detail)
     } else {
         "No events yet. Waiting for traffic...".to_string()
