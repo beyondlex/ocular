@@ -1,0 +1,12 @@
+[package]
+name = "ocular-tui"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+crossterm.workspace = true
+ratatui.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+ocular-proxy = { path = "../ocular-proxy" }
+ocular-protocol = { path = "../ocular-protocol" }

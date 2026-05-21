@@ -1,0 +1,8 @@
+# Ocular 配置文件
+# 每个 [[proxy]] 定义一个要监听的中间件代理
+
+[[proxy]]
+name = "redis"
+protocol = "redis"
+listen = "127.0.0.1:16379"   # 你的应用连接这个端口
+remote = "127.0.0.1:6379"    # 真正的 Redis 地址
