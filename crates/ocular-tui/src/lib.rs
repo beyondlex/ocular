@@ -372,7 +372,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     })).collect();
     let comp_border = if comp_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
     let left = List::new(items)
-        .block(Block::default().borders(Borders::ALL).border_style(comp_border).title(" Components "));
+        .block(Block::default().borders(Borders::TOP | Borders::LEFT | Borders::BOTTOM).border_style(comp_border).title(" Components "));
     f.render_widget(left, chunks[0]);
 
     // Right: vertical split
@@ -428,7 +428,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     let visual_info = if app.visual_mode { " [VISUAL]" } else { "" };
     let paused_info = if app.paused { " ⏸ PAUSED" } else { "" };
     let event_list = List::new(event_items)
-        .block(Block::default().borders(Borders::ALL).border_style(events_border)
+        .block(Block::default().borders(Borders::TOP | Borders::LEFT | Borders::RIGHT).border_style(events_border)
             .title(format!(" Events{}{}{}{} ", visual_info, paused_info, filter_info, count_info)));
     f.render_widget(event_list, right[0]);
 
@@ -473,7 +473,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
         .collect::<Vec<_>>().join("\n");
     let detail_border = if detail_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
-    let title = if detail_focused { " Detail (j/k scroll, y copy) " } else { " Detail " };
+    let title = if detail_focused { " Detail (j/k scroll, y copy, e edit) " } else { " Detail " };
     // Clamp scroll
     let detail_view_width = right[1].width.saturating_sub(2).max(1) as usize;
     let wrapped_lines: u16 = detail_str_for_scroll.lines()
