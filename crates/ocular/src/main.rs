@@ -23,7 +23,7 @@ pub struct ProxyConfig {
     pub remote: String,
 }
 
-fn load_config() -> Result<Config> {
+fn load_config() -> Result<(Config, PathBuf)> {
     let candidates = [
         // 1. Current directory
         Some(PathBuf::from("ocular.toml")),
@@ -34,17 +34,19 @@ fn load_config() -> Result<Config> {
     ];
     for candidate in candidates.iter().flatten() {
         if candidate.exists() {
+            let config_dir = candidate.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
             let content = std::fs::read_to_string(candidate)
                 .with_context(|| format!("failed to read {}", candidate.display()))?;
-            info!(config = %candidate.display(), "loaded config");
-            return toml::from_str(&content).context("failed to parse config");
+            let config: Config = toml::from_str(&content).context("failed to parse config")?;
+            return Ok((config, config_dir));
         }
     }
     anyhow::bail!("config not found. Create ocular.toml in current directory or ~/.config/ocular/ocular.toml")
 }
 
-fn init_tracing() {
-    let file_appender = rolling::never(".", "ocular.log");
+fn init_tracing(log_dir: &std::path::Path) {
+    std::fs::create_dir_all(log_dir).ok();
+    let file_appender = rolling::never(log_dir, "ocular.log");
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
@@ -57,10 +59,9 @@ fn init_tracing() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
-
-    let config = load_config()?;
-    info!(proxies = config.proxy.len(), "ocular starting");
+    let (config, config_dir) = load_config()?;
+    init_tracing(&config_dir);
+    info!(proxies = config.proxy.len(), config_dir = %config_dir.display(), "ocular starting");
 
     let (tx, _) = broadcast::channel::<ocular_proxy::ProxyEvent>(1024);
 

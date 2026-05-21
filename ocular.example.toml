@@ -25,6 +25,7 @@ listen = "127.0.0.1:13306"   # Your app connects here
 remote = "127.0.0.1:3306"    # Real MySQL address
 
 [[proxy]]
-name = "mysql-dev-media"
+name = "mysql-dev"
 protocol = "mysql"
 listen = "127.0.0.1:13306"   # Your app connects here
+remote = "dev_host:3306"    # Real MySQL address
