@@ -22,6 +22,8 @@ pub struct ProxyEvent {
     pub response_detail: String,
     /// Request→response latency
     pub latency: Duration,
+    /// Process that initiated the connection (PID + name)
+    pub process: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

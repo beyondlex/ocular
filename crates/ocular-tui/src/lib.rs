@@ -450,13 +450,14 @@ fn ui(f: &mut Frame, app: &mut App) {
         } else {
             ev.full_command.clone()
         };
+        let proc_line = ev.process.as_deref().map(|p| format!("Process:   {}\n", p)).unwrap_or_default();
         let header = if ev.protocol == ocular_protocol::Protocol::Redis {
-            format!("Latency:   {}\nTime:      {}\nComponent: {}\n",
-                format_latency(&ev.latency), format_time(&ev.timestamp), ev.component)
+            format!("Latency:   {}\nTime:      {}\nComponent: {}\n{}",
+                format_latency(&ev.latency), format_time(&ev.timestamp), ev.component, proc_line)
         } else {
-            format!("Response:  {}\nLatency:   {}\nTime:      {}\nComponent: {}\n",
+            format!("Response:  {}\nLatency:   {}\nTime:      {}\nComponent: {}\n{}",
                 ev.response, format_latency(&ev.latency),
-                format_time(&ev.timestamp), ev.component)
+                format_time(&ev.timestamp), ev.component, proc_line)
         };
 
         let mut lines: Vec<Line> = vec![Line::from(Span::styled("Command:", Style::default().fg(Color::Cyan)))];

@@ -33,8 +33,9 @@ pub async fn run_proxy(
         let remote = remote_addr.clone();
         let name = name.clone();
         let tx = tx.clone();
+        let process = resolve_peer_process(peer.port());
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(client, &remote, &name, protocol, &tx).await {
+            if let Err(e) = handle_conn(client, &remote, &name, protocol, &tx, process).await {
                 warn!(component = %name, remote = %remote, error = %e, "connection ended with error");
             }
         });
@@ -47,6 +48,7 @@ async fn handle_conn(
     name: &str,
     protocol: Protocol,
     tx: &broadcast::Sender<ProxyEvent>,
+    process: Option<String>,
 ) -> Result<()> {
     let mut server = match TcpStream::connect(remote_addr).await {
         Ok(s) => {
@@ -85,6 +87,7 @@ async fn handle_conn(
     let tx_resp = tx.clone();
     let pending_w = pending.clone();
     let pending_r = pending;
+    let process_info = process;
 
     let client_to_server = async move {
         let mut buf = [0u8; 65536];
@@ -107,6 +110,7 @@ async fn handle_conn(
         Ok::<_, anyhow::Error>(())
     };
 
+    let process_mysql = process_info.clone();
     let server_to_client = async move {
         let mut buf = [0u8; 65536];
         let mut mysql_buf: Vec<u8> = Vec::new();
@@ -136,6 +140,7 @@ async fn handle_conn(
                                 response,
                                 response_detail,
                                 latency,
+                                process: process_mysql.clone(),
                             });
                         }
                         mysql_buf.clear();
@@ -157,6 +162,7 @@ async fn handle_conn(
                         response,
                         response_detail,
                         latency,
+                        process: process_info.clone(),
                     });
                 }
             }
@@ -209,4 +215,62 @@ fn strip_mysql_ssl_flag(packet: &mut Vec<u8>) {
     let cap_lower_new = cap_lower & !0x0800;
     payload[pos] = (cap_lower_new & 0xff) as u8;
     payload[pos + 1] = ((cap_lower_new >> 8) & 0xff) as u8;
+}
+
+/// Resolve which process owns a local TCP port (the client's ephemeral port).
+fn resolve_peer_process(port: u16) -> Option<String> {
+    use std::process::Command;
+
+    if cfg!(target_os = "macos") {
+        // lsof -i tcp:PORT -sTCP:ESTABLISHED -Fn -Fp
+        let output = Command::new("lsof")
+            .args(["-i", &format!("tcp:{}", port), "-sTCP:ESTABLISHED", "-Fn", "-Fp"])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut pid = None;
+        let mut name = None;
+        for line in text.lines() {
+            if let Some(p) = line.strip_prefix('p') { pid = Some(p.to_string()); }
+            if let Some(n) = line.strip_prefix('n') { name = Some(n.to_string()); }
+        }
+        // lsof -Fn gives command name with 'n' prefix in some modes; use -Fc for command
+        // Actually -Fn gives network name. Let's re-query with -Fc
+        if let Some(ref p) = pid {
+            let output2 = Command::new("lsof")
+                .args(["-i", &format!("tcp:{}", port), "-sTCP:ESTABLISHED", "-Fc"])
+                .output()
+                .ok();
+            if let Some(o) = output2 {
+                let text2 = String::from_utf8_lossy(&o.stdout);
+                for line in text2.lines() {
+                    if let Some(c) = line.strip_prefix('c') { name = Some(c.to_string()); break; }
+                }
+            }
+            Some(format!("[{}] {}", p, name.unwrap_or_default()))
+        } else {
+            None
+        }
+    } else {
+        // Linux: ss -tnp sport = :PORT
+        let output = Command::new("ss")
+            .args(["-tnp", &format!("sport = :{}", port)])
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        // Parse: users:(("process_name",pid=1234,fd=5))
+        for line in text.lines() {
+            if let Some(start) = line.find("users:((\"") {
+                let rest = &line[start + 9..];
+                if let Some(end) = rest.find('"') {
+                    let proc_name = &rest[..end];
+                    let pid = rest.find("pid=")
+                        .and_then(|i| rest[i+4..].split(|c: char| !c.is_ascii_digit()).next())
+                        .unwrap_or("?");
+                    return Some(format!("[{}] {}", pid, proc_name));
+                }
+            }
+        }
+        None
+    }
 }
