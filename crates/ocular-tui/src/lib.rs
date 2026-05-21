@@ -32,6 +32,8 @@ struct App {
     filter: String,
     pending_keys: String,
     leader_active: bool,
+    visual_mode: bool,
+    visual_anchor: usize, // start of visual selection
 }
 
 impl App {
@@ -72,6 +74,8 @@ pub async fn run(
         filter: String::new(),
         pending_keys: String::new(),
         leader_active: false,
+        visual_mode: false,
+        visual_anchor: 0,
     };
 
     loop {
@@ -192,9 +196,35 @@ pub async fn run(
                     KeyCode::Char('y') if app.focus == Focus::Events || app.focus == Focus::Detail => {
                         app.pending_keys.clear();
                         let filtered = app.filtered_events();
-                        if let Some((_, ev)) = filtered.get(app.selected) {
-                            copy_to_clipboard(&ev.full_command);
+                        let text = get_selected_commands(&filtered, &app);
+                        if !text.is_empty() {
+                            copy_to_clipboard(&text);
                         }
+                        app.visual_mode = false;
+                    }
+                    KeyCode::Char('v') if app.focus == Focus::Events => {
+                        app.pending_keys.clear();
+                        if app.visual_mode {
+                            app.visual_mode = false;
+                        } else {
+                            app.visual_mode = true;
+                            app.visual_anchor = app.selected;
+                        }
+                    }
+                    KeyCode::Char('e') if app.focus == Focus::Events || app.focus == Focus::Detail => {
+                        app.pending_keys.clear();
+                        let filtered = app.filtered_events();
+                        let text = get_selected_commands(&filtered, &app);
+                        if !text.is_empty() {
+                            // Temporarily leave TUI to open editor
+                            disable_raw_mode()?;
+                            stdout().execute(LeaveAlternateScreen)?;
+                            open_in_editor(&text);
+                            stdout().execute(EnterAlternateScreen)?;
+                            enable_raw_mode()?;
+                            terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+                        }
+                        app.visual_mode = false;
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         app.pending_keys.clear();
@@ -331,8 +361,15 @@ fn ui(f: &mut Frame, app: &mut App) {
             let time = format_time(&ev.timestamp);
             let lat = format_latency(&ev.latency);
             let line = format!(" {:>5} {} [{}] {} ({})", idx + 1, time, ev.component, ev.command, lat);
+            let in_visual = app.visual_mode && {
+                let lo = app.visual_anchor.min(app.selected);
+                let hi = app.visual_anchor.max(app.selected);
+                idx >= lo && idx <= hi
+            };
             let style = if idx == app.selected {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else if in_visual {
+                Style::default().bg(Color::Rgb(60, 60, 80)).fg(Color::White)
             } else {
                 Style::default()
             };
@@ -341,9 +378,10 @@ fn ui(f: &mut Frame, app: &mut App) {
     let filter_info = if app.filter.is_empty() { String::new() } else { format!(" [filter: {}]", app.filter) };
     let count_info = format!(" ({}/{})", filtered.len(), app.events.len());
     let events_border = if events_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
+    let visual_info = if app.visual_mode { " [VISUAL]" } else { "" };
     let event_list = List::new(event_items)
         .block(Block::default().borders(Borders::ALL).border_style(events_border)
-            .title(format!(" Events{}{} ", filter_info, count_info)));
+            .title(format!(" Events{}{}{} ", visual_info, filter_info, count_info)));
     f.render_widget(event_list, right[0]);
 
     // Detail panel
@@ -427,4 +465,34 @@ fn copy_to_clipboard(text: &str) {
         }
         let _ = child.wait();
     }
+}
+
+fn get_selected_commands(filtered: &[(usize, &ProxyEvent)], app: &App) -> String {
+    if app.visual_mode {
+        let lo = app.visual_anchor.min(app.selected);
+        let hi = app.visual_anchor.max(app.selected);
+        filtered.iter()
+            .enumerate()
+            .filter(|(idx, _)| *idx >= lo && *idx <= hi)
+            .map(|(_, (_, ev))| ev.full_command.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        filtered.get(app.selected)
+            .map(|(_, ev)| ev.full_command.clone())
+            .unwrap_or_default()
+    }
+}
+
+fn open_in_editor(text: &str) {
+    use std::io::Write;
+    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+    let mut tmp = std::env::temp_dir();
+    tmp.push("ocular_edit.sql");
+    if let Ok(mut f) = std::fs::File::create(&tmp) {
+        let _ = f.write_all(text.as_bytes());
+    }
+    let _ = std::process::Command::new(&editor)
+        .arg(&tmp)
+        .status();
 }
