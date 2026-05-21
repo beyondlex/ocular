@@ -7,7 +7,7 @@ use crossterm::{
 use ocular_proxy::ProxyEvent;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 use std::io::stdout;
 use std::time::Duration;
@@ -31,6 +31,7 @@ struct App {
     component_idx: Option<usize>, // None = all, Some(i) = filter by component i
     filter: String,
     pending_keys: String, // for number + gg jumps
+    leader_active: bool,  // space leader menu open
 }
 
 impl App {
@@ -72,6 +73,7 @@ pub async fn run(
         component_idx: None,
         filter: String::new(),
         pending_keys: String::new(),
+        leader_active: false,
     };
 
     loop {
@@ -100,8 +102,25 @@ pub async fn run(
                     continue;
                 }
 
+                if app.leader_active {
+                    app.leader_active = false;
+                    match key.code {
+                        KeyCode::Char('j') => { app.focus = Focus::Detail; app.detail_scroll = 0; }
+                        KeyCode::Char('k') => { app.focus = Focus::Events; }
+                        KeyCode::Char('h') => { app.focus = Focus::Components; }
+                        KeyCode::Char('l') => { app.focus = Focus::Events; }
+                        KeyCode::Char('c') => { app.events.clear(); app.selected = 0; }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Char('q') => break,
+                    KeyCode::Char(' ') => {
+                        app.pending_keys.clear();
+                        app.leader_active = true;
+                    }
                     KeyCode::Char('/') => {
                         app.pending_keys.clear();
                         app.focus = Focus::Filter;
@@ -378,4 +397,29 @@ fn ui(f: &mut Frame, app: &App) {
         Span::raw(" Tab cycle panels │ / filter │ j/k navigate │ Esc clear │ q quit")
     };
     f.render_widget(Paragraph::new(Line::from(status)), outer[1]);
+
+    // Leader key floating menu
+    if app.leader_active {
+        let menu_lines = vec![
+            Line::from(Span::styled(" Space Leader Menu", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
+            Line::from(""),
+            Line::from(vec![Span::styled(" h", Style::default().fg(Color::Cyan)), Span::raw("  → Components panel")]),
+            Line::from(vec![Span::styled(" j", Style::default().fg(Color::Cyan)), Span::raw("  → Detail panel")]),
+            Line::from(vec![Span::styled(" k", Style::default().fg(Color::Cyan)), Span::raw("  → Events panel")]),
+            Line::from(vec![Span::styled(" l", Style::default().fg(Color::Cyan)), Span::raw("  → Events panel")]),
+            Line::from(vec![Span::styled(" c", Style::default().fg(Color::Cyan)), Span::raw("  → Clear all events")]),
+            Line::from(""),
+            Line::from(Span::styled(" Esc/any  → cancel", Style::default().fg(Color::DarkGray))),
+        ];
+        let menu_height = menu_lines.len() as u16 + 2;
+        let menu_width = 28;
+        let area = f.area();
+        let x = (area.width.saturating_sub(menu_width)) / 2;
+        let y = (area.height.saturating_sub(menu_height)) / 2;
+        let popup_area = Rect::new(x, y, menu_width, menu_height);
+        f.render_widget(Clear, popup_area);
+        let popup = Paragraph::new(menu_lines)
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)));
+        f.render_widget(popup, popup_area);
+    }
 }

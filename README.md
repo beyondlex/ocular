@@ -86,7 +86,20 @@ mysql -h 127.0.0.1 -P 13306 -u root -p
 | `/` | Enter filter mode (match component or command) |
 | `Enter` | Confirm filter / select component |
 | `Esc` | Clear filter or component selection |
+| `Space` | Open leader menu (see below) |
 | `q` | Quit |
+
+### Leader Menu (Space)
+
+Press `Space` to open a floating command palette:
+
+| Key | Action |
+|-----|--------|
+| `h` | Jump to Components panel |
+| `j` | Jump to Detail panel |
+| `k` | Jump to Events panel |
+| `l` | Jump to Events panel |
+| `c` | Clear all events |
 
 ## Architecture
 
