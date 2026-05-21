@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 pub struct ProxyEvent {
     pub timestamp: SystemTime,
     pub component: String,
+    pub protocol: Protocol,
     pub direction: Direction,
     pub summary: String,
     pub raw: Vec<u8>,
@@ -24,7 +25,6 @@ pub enum Direction {
     Response,
 }
 
-/// Supported protocol types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Protocol {
     Redis,
@@ -61,6 +61,18 @@ pub fn parse_response(protocol: Protocol, buf: &[u8]) -> Option<String> {
         }
         Protocol::Mysql => {
             parse_mysql_response(buf).map(|r| r.to_summary())
+        }
+    }
+}
+
+/// Parse response bytes into a detailed display string (for detail panel)
+pub fn format_response_detail(protocol: Protocol, buf: &[u8]) -> Option<String> {
+    match protocol {
+        Protocol::Redis => {
+            parse_resp(buf).ok().flatten().map(|(val, _)| val.to_command_string())
+        }
+        Protocol::Mysql => {
+            parse_mysql_response(buf).map(|r| r.to_display())
         }
     }
 }

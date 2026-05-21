@@ -96,6 +96,7 @@ async fn handle_conn(
                 let _ = tx_req.send(ProxyEvent {
                     timestamp: SystemTime::now(),
                     component: name_req.clone(),
+                    protocol,
                     direction: Direction::Request,
                     summary,
                     raw: data.to_vec(),
@@ -119,6 +120,7 @@ async fn handle_conn(
                 let _ = tx_resp.send(ProxyEvent {
                     timestamp: SystemTime::now(),
                     component: name_resp.clone(),
+                    protocol,
                     direction: Direction::Response,
                     summary,
                     raw: data.to_vec(),

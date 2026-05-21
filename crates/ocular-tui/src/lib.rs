@@ -196,6 +196,28 @@ fn format_latency(d: &Duration) -> String {
     }
 }
 
+/// Sanitize raw bytes for safe terminal display.
+/// Replaces control chars with escape notation, truncates to max_bytes.
+fn sanitize_raw(raw: &[u8], max_bytes: usize) -> String {
+    let truncated = raw.len() > max_bytes;
+    let slice = &raw[..raw.len().min(max_bytes)];
+    let mut out = String::with_capacity(slice.len());
+    for &b in slice {
+        match b {
+            b'\r' => out.push_str("\\r"),
+            b'\n' => { out.push_str("\\n"); out.push('\n'); }
+            b'\t' => out.push_str("\\t"),
+            0x00 => out.push_str("\\0"),
+            0x20..=0x7e => out.push(b as char),
+            _ => { out.push_str(&format!("\\x{:02x}", b)); }
+        }
+    }
+    if truncated {
+        out.push_str("\n... (truncated)");
+    }
+    out
+}
+
 fn ui(f: &mut Frame, app: &App) {
     let outer = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
@@ -281,10 +303,19 @@ fn ui(f: &mut Frame, app: &App) {
     let selected_event = filtered.get(app.selected).map(|(_, ev)| *ev);
     let detail = if let Some(ev) = selected_event {
         let lat_str = ev.latency.as_ref().map(|d| format_latency(d)).unwrap_or_else(|| "-".into());
-        let raw_display = String::from_utf8_lossy(&ev.raw).replace("\r\n", "\\r\\n\n");
-        format!("Time:      {}\nComponent: {}\nDirection: {:?}\nLatency:   {}\nCommand:   {}\n\nRaw ({} bytes):\n{}",
+        // For responses, show parsed result instead of raw bytes
+        let body = if ev.direction == ocular_protocol::Direction::Response {
+            if let Some(formatted) = ocular_protocol::format_response_detail(ev.protocol, &ev.raw) {
+                formatted
+            } else {
+                sanitize_raw(&ev.raw, 512)
+            }
+        } else {
+            sanitize_raw(&ev.raw, 512)
+        };
+        format!("Time:      {}\nComponent: {}\nDirection: {:?}\nLatency:   {}\nCommand:   {}\n\n{}",
             format_time(&ev.timestamp), ev.component, ev.direction, lat_str,
-            ev.summary, ev.raw.len(), raw_display)
+            ev.summary, body)
     } else {
         "No events yet. Waiting for traffic...".to_string()
     };
