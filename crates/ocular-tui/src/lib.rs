@@ -221,12 +221,11 @@ pub async fn run(
                             app.visual_anchor = app.selected;
                         }
                     }
-                    KeyCode::Char('e') if app.focus == Focus::Events || app.focus == Focus::Detail => {
+                    KeyCode::Char('e') if app.focus == Focus::Events => {
                         app.pending_keys.clear();
                         let filtered = app.filtered_events();
                         let text = get_selected_commands(&filtered, &app);
                         if !text.is_empty() {
-                            // Temporarily leave TUI to open editor
                             disable_raw_mode()?;
                             stdout().execute(LeaveAlternateScreen)?;
                             open_in_editor(&text);
@@ -235,6 +234,26 @@ pub async fn run(
                             terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
                         }
                         app.visual_mode = false;
+                    }
+                    KeyCode::Char('e') if app.focus == Focus::Detail => {
+                        app.pending_keys.clear();
+                        let filtered = app.filtered_events();
+                        if let Some((_, ev)) = filtered.get(app.selected) {
+                            let detail_content = if ev.protocol == ocular_protocol::Protocol::Mysql {
+                                format!("{}\n\n-- Response: {}\n-- Latency: {}\n\n{}",
+                                    ev.full_command, ev.response,
+                                    format_latency(&ev.latency), ev.response_detail)
+                            } else {
+                                format!("{}\n\n# Response: {}\n# Latency: {}",
+                                    ev.full_command, ev.response, format_latency(&ev.latency))
+                            };
+                            disable_raw_mode()?;
+                            stdout().execute(LeaveAlternateScreen)?;
+                            open_in_editor(&detail_content);
+                            stdout().execute(EnterAlternateScreen)?;
+                            enable_raw_mode()?;
+                            terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+                        }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         app.pending_keys.clear();
