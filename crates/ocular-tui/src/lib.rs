@@ -13,6 +13,9 @@ use std::io::stdout;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
+mod theme;
+pub use theme::Theme;
+
 #[derive(Debug, Clone)]
 pub struct ComponentInfo {
     pub name: String,
@@ -354,22 +357,32 @@ fn ui(f: &mut Frame, app: &mut App) {
     } else {
         app.selected + scroll_margin - visible_height + 1
     };
+    let theme = Theme::default();
     let event_items: Vec<ListItem> = filtered.iter().enumerate()
         .skip(visible_start)
         .take(visible_height)
         .map(|(idx, (_orig_idx, ev))| {
             let time = format_time(&ev.timestamp);
             let lat = format_latency(&ev.latency);
-            let line = format!(" {:>5} {} [{}] {} ({})", idx + 1, time, ev.component, ev.command, lat);
+            let line = Line::from(vec![
+                Span::styled(format!(" {:>5} ", idx + 1), theme.line_number),
+                Span::styled(time, theme.timestamp),
+                Span::raw(" "),
+                Span::styled(format!("[{}]", ev.component), theme.component_style(&ev.component)),
+                Span::raw(" "),
+                Span::styled(ev.command.clone(), theme.command),
+                Span::raw(" "),
+                Span::styled(format!("({})", lat), theme.latency),
+            ]);
             let in_visual = app.visual_mode && {
                 let lo = app.visual_anchor.min(app.selected);
                 let hi = app.visual_anchor.max(app.selected);
                 idx >= lo && idx <= hi
             };
             let style = if idx == app.selected {
-                Style::default().bg(Color::DarkGray).fg(Color::White)
+                theme.selected
             } else if in_visual {
-                Style::default().bg(Color::Rgb(60, 60, 80)).fg(Color::White)
+                theme.visual
             } else {
                 Style::default()
             };
