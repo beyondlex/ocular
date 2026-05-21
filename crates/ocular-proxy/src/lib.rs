@@ -220,37 +220,36 @@ fn strip_mysql_ssl_flag(packet: &mut Vec<u8>) {
 /// Resolve which process owns a local TCP port (the client's ephemeral port).
 fn resolve_peer_process(port: u16) -> Option<String> {
     use std::process::Command;
+    let my_pid = std::process::id().to_string();
 
     if cfg!(target_os = "macos") {
-        // lsof -i tcp:PORT -sTCP:ESTABLISHED -Fn -Fp
+        // lsof -i tcp:PORT -sTCP:ESTABLISHED -Fp -Fc
+        // Returns multiple process entries; skip our own PID
         let output = Command::new("lsof")
-            .args(["-i", &format!("tcp:{}", port), "-sTCP:ESTABLISHED", "-Fn", "-Fp"])
+            .args(["-i", &format!("tcp:{}", port), "-sTCP:ESTABLISHED", "-Fp", "-Fc"])
             .output()
             .ok()?;
         let text = String::from_utf8_lossy(&output.stdout);
-        let mut pid = None;
-        let mut name = None;
+        let mut current_pid = String::new();
+        let mut current_cmd = String::new();
         for line in text.lines() {
-            if let Some(p) = line.strip_prefix('p') { pid = Some(p.to_string()); }
-            if let Some(n) = line.strip_prefix('n') { name = Some(n.to_string()); }
-        }
-        // lsof -Fn gives command name with 'n' prefix in some modes; use -Fc for command
-        // Actually -Fn gives network name. Let's re-query with -Fc
-        if let Some(ref p) = pid {
-            let output2 = Command::new("lsof")
-                .args(["-i", &format!("tcp:{}", port), "-sTCP:ESTABLISHED", "-Fc"])
-                .output()
-                .ok();
-            if let Some(o) = output2 {
-                let text2 = String::from_utf8_lossy(&o.stdout);
-                for line in text2.lines() {
-                    if let Some(c) = line.strip_prefix('c') { name = Some(c.to_string()); break; }
+            if let Some(p) = line.strip_prefix('p') {
+                // Save previous entry if it wasn't us
+                if !current_pid.is_empty() && current_pid != my_pid {
+                    return Some(format!("[{}] {}", current_pid, current_cmd));
                 }
+                current_pid = p.to_string();
+                current_cmd.clear();
             }
-            Some(format!("[{}] {}", p, name.unwrap_or_default()))
-        } else {
-            None
+            if let Some(c) = line.strip_prefix('c') {
+                current_cmd = c.to_string();
+            }
         }
+        // Check last entry
+        if !current_pid.is_empty() && current_pid != my_pid {
+            return Some(format!("[{}] {}", current_pid, current_cmd));
+        }
+        None
     } else {
         // Linux: ss -tnp sport = :PORT
         let output = Command::new("ss")
