@@ -38,6 +38,7 @@ struct App {
     visual_mode: bool,
     visual_anchor: usize, // start of visual selection
     theme: Theme,
+    paused: bool,
 }
 
 impl App {
@@ -82,10 +83,12 @@ pub async fn run(
         visual_mode: false,
         visual_anchor: 0,
         theme,
+        paused: false,
     };
 
     loop {
         while let Ok(ev) = rx.try_recv() {
+            if app.paused { continue; }
             app.events.push(ev);
             if app.focus == Focus::Events && app.filter.is_empty() {
                 let filtered = app.filtered_events();
@@ -118,6 +121,7 @@ pub async fn run(
                         KeyCode::Char('h') => { app.focus = Focus::Components; }
                         KeyCode::Char('l') => { app.focus = Focus::Events; }
                         KeyCode::Char('c') => { app.events.clear(); app.selected = 0; }
+                        KeyCode::Char('p') => { app.paused = !app.paused; }
                         _ => {}
                     }
                     continue;
@@ -395,9 +399,10 @@ fn ui(f: &mut Frame, app: &mut App) {
     let count_info = format!(" ({}/{})", filtered.len(), app.events.len());
     let events_border = if events_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
     let visual_info = if app.visual_mode { " [VISUAL]" } else { "" };
+    let paused_info = if app.paused { " ⏸ PAUSED" } else { "" };
     let event_list = List::new(event_items)
         .block(Block::default().borders(Borders::ALL).border_style(events_border)
-            .title(format!(" Events{}{}{} ", visual_info, filter_info, count_info)));
+            .title(format!(" Events{}{}{}{} ", visual_info, paused_info, filter_info, count_info)));
     f.render_widget(event_list, right[0]);
 
     // Detail panel
@@ -443,6 +448,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from(vec![Span::styled(" k", Style::default().fg(Color::Cyan)), Span::raw("  → Events panel")]),
             Line::from(vec![Span::styled(" l", Style::default().fg(Color::Cyan)), Span::raw("  → Events panel")]),
             Line::from(vec![Span::styled(" c", Style::default().fg(Color::Cyan)), Span::raw("  → Clear all events")]),
+            Line::from(vec![Span::styled(" p", Style::default().fg(Color::Cyan)), Span::raw("  → Pause/resume stream")]),
             Line::from(""),
             Line::from(Span::styled(" Esc/any  → cancel", Style::default().fg(Color::DarkGray))),
         ];
