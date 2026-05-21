@@ -28,6 +28,9 @@ Your App ──→ Ocular Proxy (16379) ──→ Redis (6379)
 - **Auto SSL stripping** — MySQL connections work without `--ssl-mode=DISABLED`
 - **Local timezone** — timestamps match your system clock
 - **Vim-style navigation** — `gg`, `G`, `Ngg` line jumps
+- **Visual selection** — select multiple events, copy or open in editor
+- **Yank to clipboard** — `y` copies command/SQL to system clipboard
+- **Open in $EDITOR** — `e` opens selected commands in vim/nvim
 - **Language agnostic** — works with Java, Rust, Go, Python, anything
 
 ## Supported Protocols
@@ -86,6 +89,9 @@ mysql -h 127.0.0.1 -P 13306 -u root -p
 | `/` | Enter filter mode (match component or command) |
 | `Enter` | Confirm filter / select component |
 | `Esc` | Clear filter or component selection |
+| `v` | Toggle visual (multi-line) selection |
+| `y` | Copy selected command(s) to clipboard |
+| `e` | Open selected command(s) in `$EDITOR` |
 | `Space` | Open leader menu (see below) |
 | `q` | Quit |
 
