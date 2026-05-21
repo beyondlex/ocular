@@ -161,6 +161,10 @@ pub async fn run(
                         app.selected = max;
                         app.detail_scroll = 0;
                     }
+                    KeyCode::Char('G') if app.focus == Focus::Detail => {
+                        app.pending_keys.clear();
+                        app.detail_scroll = u16::MAX;
+                    }
                     KeyCode::Char('g') if app.focus == Focus::Events => {
                         if app.pending_keys.ends_with('g') {
                             // gg or Ngg
@@ -173,6 +177,14 @@ pub async fn run(
                             }
                             app.pending_keys.clear();
                             app.detail_scroll = 0;
+                        } else {
+                            app.pending_keys.push('g');
+                        }
+                    }
+                    KeyCode::Char('g') if app.focus == Focus::Detail => {
+                        if app.pending_keys.ends_with('g') {
+                            app.detail_scroll = 0;
+                            app.pending_keys.clear();
                         } else {
                             app.pending_keys.push('g');
                         }
