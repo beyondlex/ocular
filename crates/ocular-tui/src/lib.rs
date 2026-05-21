@@ -28,26 +28,24 @@ struct App {
     detail_scroll: u16,
     focus: Focus,
     components: Vec<ComponentInfo>,
-    component_idx: Option<usize>, // None = all, Some(i) = filter by component i
+    component_idx: Option<usize>,
     filter: String,
-    pending_keys: String, // for number + gg jumps
-    leader_active: bool,  // space leader menu open
+    pending_keys: String,
+    leader_active: bool,
 }
 
 impl App {
     fn filtered_events(&self) -> Vec<(usize, &ProxyEvent)> {
         self.events.iter().enumerate().filter(|(_, ev)| {
-            // Component filter
             if let Some(idx) = self.component_idx {
                 if let Some(c) = self.components.get(idx) {
                     if ev.component != c.name { return false; }
                 }
             }
-            // Text filter
             if !self.filter.is_empty() {
                 let q = self.filter.to_lowercase();
                 if !ev.component.to_lowercase().contains(&q)
-                    && !ev.summary.to_lowercase().contains(&q) {
+                    && !ev.command.to_lowercase().contains(&q) {
                     return false;
                 }
             }
@@ -167,13 +165,12 @@ pub async fn run(
                     }
                     KeyCode::Char('g') if app.focus == Focus::Events => {
                         if app.pending_keys.ends_with('g') {
-                            // gg or Ngg
                             let num_str: String = app.pending_keys.chars().take_while(|c| c.is_ascii_digit()).collect();
                             let max = app.filtered_events().len().saturating_sub(1);
                             if num_str.is_empty() {
-                                app.selected = 0; // gg = go to first
+                                app.selected = 0;
                             } else if let Ok(n) = num_str.parse::<usize>() {
-                                app.selected = n.saturating_sub(1).min(max); // Ngg = go to line N
+                                app.selected = n.saturating_sub(1).min(max);
                             }
                             app.pending_keys.clear();
                             app.detail_scroll = 0;
@@ -196,13 +193,7 @@ pub async fn run(
                         app.pending_keys.clear();
                         let filtered = app.filtered_events();
                         if let Some((_, ev)) = filtered.get(app.selected) {
-                            let text = if ev.direction == ocular_protocol::Direction::Request {
-                                ocular_protocol::extract_full_command(ev.protocol, &ev.raw)
-                                    .unwrap_or_else(|| ev.summary.clone())
-                            } else {
-                                ev.summary.clone()
-                            };
-                            copy_to_clipboard(&text);
+                            copy_to_clipboard(&ev.full_command);
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -278,28 +269,6 @@ fn format_latency(d: &Duration) -> String {
     }
 }
 
-/// Sanitize raw bytes for safe terminal display.
-/// Replaces control chars with escape notation, truncates to max_bytes.
-fn sanitize_raw(raw: &[u8], max_bytes: usize) -> String {
-    let truncated = raw.len() > max_bytes;
-    let slice = &raw[..raw.len().min(max_bytes)];
-    let mut out = String::with_capacity(slice.len());
-    for &b in slice {
-        match b {
-            b'\r' => out.push_str("\\r"),
-            b'\n' => { out.push_str("\\n"); out.push('\n'); }
-            b'\t' => out.push_str("\\t"),
-            0x00 => out.push_str("\\0"),
-            0x20..=0x7e => out.push(b as char),
-            _ => { out.push_str(&format!("\\x{:02x}", b)); }
-        }
-    }
-    if truncated {
-        out.push_str("\n... (truncated)");
-    }
-    out
-}
-
 fn ui(f: &mut Frame, app: &mut App) {
     let outer = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
@@ -342,14 +311,13 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Right: vertical split
     let right = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[1]);
 
-    // Event stream (filtered)
+    // Event stream
     let filtered = app.filtered_events();
     let events_focused = app.focus == Focus::Events;
     let visible_height = right[0].height.saturating_sub(2) as usize;
-    // Ensure selected item is always within the visible window with margin
     let scroll_margin: usize = 3;
     let visible_start = if app.selected + scroll_margin < visible_height {
         0
@@ -360,13 +328,9 @@ fn ui(f: &mut Frame, app: &mut App) {
         .skip(visible_start)
         .take(visible_height)
         .map(|(idx, (_orig_idx, ev))| {
-            let arrow = match ev.direction {
-                ocular_protocol::Direction::Request => "→",
-                ocular_protocol::Direction::Response => "←",
-            };
             let time = format_time(&ev.timestamp);
-            let lat = ev.latency.as_ref().map(|d| format!(" ({})", format_latency(d))).unwrap_or_default();
-            let line = format!(" {:>5} {} {} [{}] {}{}", idx + 1, time, arrow, ev.component, ev.summary, lat);
+            let lat = format_latency(&ev.latency);
+            let line = format!(" {:>5} {} [{}] {} ({})", idx + 1, time, ev.component, ev.command, lat);
             let style = if idx == app.selected {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else {
@@ -374,11 +338,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             };
             ListItem::new(line).style(style)
         }).collect();
-    let filter_info = if app.filter.is_empty() {
-        String::new()
-    } else {
-        format!(" [filter: {}]", app.filter)
-    };
+    let filter_info = if app.filter.is_empty() { String::new() } else { format!(" [filter: {}]", app.filter) };
     let count_info = format!(" ({}/{})", filtered.len(), app.events.len());
     let events_border = if events_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
     let event_list = List::new(event_items)
@@ -390,32 +350,18 @@ fn ui(f: &mut Frame, app: &mut App) {
     let detail_focused = app.focus == Focus::Detail;
     let selected_event = filtered.get(app.selected).map(|(_, ev)| *ev);
     let detail = if let Some(ev) = selected_event {
-        let lat_str = ev.latency.as_ref().map(|d| format_latency(d)).unwrap_or_else(|| "-".into());
-        // For responses, show parsed result instead of raw bytes
-        let body = if ev.direction == ocular_protocol::Direction::Response {
-            if let Some(formatted) = ocular_protocol::format_response_detail(ev.protocol, &ev.raw) {
-                formatted
-            } else {
-                sanitize_raw(&ev.raw, 512)
-            }
-        } else {
-            sanitize_raw(&ev.raw, 512)
-        };
-        format!("Time:      {}\nComponent: {}\nDirection: {:?}\nLatency:   {}\nCommand:   {}\n\n{}",
-            format_time(&ev.timestamp), ev.component, ev.direction, lat_str,
-            ev.summary, body)
+        format!("Command:   {}\nResponse:  {}\nLatency:   {}\nTime:      {}\nComponent: {}\n\n{}",
+            ev.full_command, ev.response, format_latency(&ev.latency),
+            format_time(&ev.timestamp), ev.component, ev.response_detail)
     } else {
         "No events yet. Waiting for traffic...".to_string()
     };
     let detail_border = if detail_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
-    let title = if detail_focused { " Detail (j/k scroll) " } else { " Detail " };
+    let title = if detail_focused { " Detail (j/k scroll, y copy) " } else { " Detail " };
+    // Clamp scroll
     let detail_view_width = right[1].width.saturating_sub(2).max(1) as usize;
-    // Estimate total rendered lines (accounting for line wrapping)
     let wrapped_lines: u16 = detail.lines()
-        .map(|l| {
-            let w = l.chars().count().max(1);
-            (((w + detail_view_width - 1) / detail_view_width) as u16).max(1)
-        })
+        .map(|l| ((l.chars().count().max(1) + detail_view_width - 1) / detail_view_width) as u16)
         .sum();
     let max_scroll = wrapped_lines.saturating_sub(1);
     app.detail_scroll = app.detail_scroll.min(max_scroll);
@@ -429,11 +375,11 @@ fn ui(f: &mut Frame, app: &mut App) {
     let status = if app.focus == Focus::Filter {
         Span::styled(format!("/{}", app.filter), Style::default().fg(Color::Yellow))
     } else {
-        Span::raw(" Tab cycle panels │ / filter │ j/k navigate │ Esc clear │ q quit")
+        Span::raw(" Tab cycle │ / filter │ j/k navigate │ y copy │ Space menu │ q quit")
     };
     f.render_widget(Paragraph::new(Line::from(status)), outer[1]);
 
-    // Leader key floating menu
+    // Leader menu
     if app.leader_active {
         let menu_lines = vec![
             Line::from(Span::styled(" Space Leader Menu", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
@@ -462,24 +408,17 @@ fn ui(f: &mut Frame, app: &mut App) {
 fn copy_to_clipboard(text: &str) {
     use std::process::{Command, Stdio};
     use std::io::Write;
-    // macOS: pbcopy, Linux: xclip or wl-copy
     let mut child = if cfg!(target_os = "macos") {
         Command::new("pbcopy")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
             .spawn()
     } else {
         Command::new("xclip")
             .args(["-selection", "clipboard"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
             .spawn()
             .or_else(|_| Command::new("wl-copy")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+                .stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null())
                 .spawn())
     };
     if let Ok(ref mut child) = child {

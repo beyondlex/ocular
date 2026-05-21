@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ocular_protocol::{Direction, Protocol, parse_request, parse_response};
+use ocular_protocol::{Protocol, parse_request, parse_response, extract_full_command, format_response_detail};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -8,6 +8,14 @@ use tokio::sync::{broadcast, Mutex};
 use tracing::{info, warn, error, debug};
 
 pub use ocular_protocol::ProxyEvent;
+
+/// Pending request info
+struct PendingRequest {
+    timestamp: SystemTime,
+    instant: Instant,
+    command: String,
+    full_command: String,
+}
 
 pub async fn run_proxy(
     listen_addr: String,
@@ -46,12 +54,8 @@ async fn handle_conn(
             s
         }
         Err(e) => {
-            error!(
-                component = %name,
-                remote = %remote_addr,
-                error = %e,
-                "failed to connect to remote — is the service running?"
-            );
+            error!(component = %name, remote = %remote_addr, error = %e,
+                "failed to connect to remote — is the service running?");
             if protocol == Protocol::Redis {
                 let err_msg = format!("-ERR ocular proxy: cannot reach {} ({})\r\n", remote_addr, e);
                 let _ = client.write_all(err_msg.as_bytes()).await;
@@ -60,7 +64,7 @@ async fn handle_conn(
         }
     };
 
-    // For MySQL: intercept the server greeting and strip SSL capability
+    // For MySQL: strip SSL from greeting
     if protocol == Protocol::Mysql {
         let mut greeting_buf = [0u8; 65536];
         let n = server.read(&mut greeting_buf).await?;
@@ -74,14 +78,13 @@ async fn handle_conn(
     let (mut cr, mut cw) = client.split();
     let (mut sr, mut sw) = server.split();
 
-    let last_req_time: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+    let pending: Arc<Mutex<Option<PendingRequest>>> = Arc::new(Mutex::new(None));
 
     let name_req = name.to_string();
     let name_resp = name.to_string();
-    let tx_req = tx.clone();
     let tx_resp = tx.clone();
-    let req_time_w = last_req_time.clone();
-    let req_time_r = last_req_time;
+    let pending_w = pending.clone();
+    let pending_r = pending;
 
     let client_to_server = async move {
         let mut buf = [0u8; 65536];
@@ -89,18 +92,14 @@ async fn handle_conn(
             let n = cr.read(&mut buf).await?;
             if n == 0 { break; }
             let data = &buf[..n];
-            if let Some(summary) = parse_request(protocol, data) {
-                let now = Instant::now();
-                *req_time_w.lock().await = Some(now);
-                debug!(component = %name_req, direction = "request", %summary);
-                let _ = tx_req.send(ProxyEvent {
+            if let Some(command) = parse_request(protocol, data) {
+                let full_command = extract_full_command(protocol, data).unwrap_or_else(|| command.clone());
+                debug!(component = %name_req, %command);
+                *pending_w.lock().await = Some(PendingRequest {
                     timestamp: SystemTime::now(),
-                    component: name_req.clone(),
-                    protocol,
-                    direction: Direction::Request,
-                    summary,
-                    raw: data.to_vec(),
-                    latency: None,
+                    instant: Instant::now(),
+                    command,
+                    full_command,
                 });
             }
             sw.write_all(data).await?;
@@ -111,7 +110,7 @@ async fn handle_conn(
     let server_to_client = async move {
         let mut buf = [0u8; 65536];
         let mut mysql_buf: Vec<u8> = Vec::new();
-        let mut awaiting_response = false; // MySQL: collecting response packets
+        let mut awaiting_response = false;
         loop {
             let n = sr.read(&mut buf).await?;
             if n == 0 { break; }
@@ -119,22 +118,23 @@ async fn handle_conn(
             cw.write_all(data).await?;
 
             if protocol == Protocol::Mysql {
-                let has_pending_req = req_time_r.lock().await.is_some();
-                if has_pending_req || awaiting_response {
+                let has_pending = pending_r.lock().await.is_some();
+                if has_pending || awaiting_response {
                     awaiting_response = true;
                     mysql_buf.extend_from_slice(data);
-                    // Check if we've received the complete response (EOF/OK packet at end)
                     if mysql_response_complete(&mysql_buf) {
-                        let latency = req_time_r.lock().await.take().map(|t| t.elapsed());
-                        if let Some(summary) = parse_response(protocol, &mysql_buf) {
-                            debug!(component = %name_resp, direction = "response", %summary, ?latency);
+                        if let Some(req) = pending_r.lock().await.take() {
+                            let latency = req.instant.elapsed();
+                            let response = parse_response(protocol, &mysql_buf).unwrap_or_default();
+                            let response_detail = format_response_detail(protocol, &mysql_buf).unwrap_or_default();
                             let _ = tx_resp.send(ProxyEvent {
-                                timestamp: SystemTime::now(),
+                                timestamp: req.timestamp,
                                 component: name_resp.clone(),
                                 protocol,
-                                direction: Direction::Response,
-                                summary,
-                                raw: mysql_buf.clone(),
+                                command: req.command,
+                                full_command: req.full_command,
+                                response,
+                                response_detail,
                                 latency,
                             });
                         }
@@ -143,16 +143,19 @@ async fn handle_conn(
                     }
                 }
             } else {
-                if let Some(summary) = parse_response(protocol, data) {
-                    let latency = req_time_r.lock().await.take().map(|t| t.elapsed());
-                    debug!(component = %name_resp, direction = "response", %summary, ?latency);
+                // Redis: single request/response per read
+                if let Some(req) = pending_r.lock().await.take() {
+                    let latency = req.instant.elapsed();
+                    let response = parse_response(protocol, data).unwrap_or_default();
+                    let response_detail = response.clone();
                     let _ = tx_resp.send(ProxyEvent {
-                        timestamp: SystemTime::now(),
+                        timestamp: req.timestamp,
                         component: name_resp.clone(),
                         protocol,
-                        direction: Direction::Response,
-                        summary,
-                        raw: data.to_vec(),
+                        command: req.command,
+                        full_command: req.full_command,
+                        response,
+                        response_detail,
                         latency,
                     });
                 }
@@ -168,77 +171,42 @@ async fn handle_conn(
     Ok(())
 }
 
-/// Check if a MySQL response buffer contains a complete response.
-/// A response is complete when:
-/// - It's an OK packet (marker 0x00, seq >= 1, small payload)
-/// - It's an ERR packet (marker 0xff)
-/// - It's a ResultSet that ends with an EOF packet (marker 0xfe, payload < 9 bytes)
 fn mysql_response_complete(buf: &[u8]) -> bool {
     if buf.len() < 5 { return false; }
-    // Check the first packet to determine response type
     let first_marker = buf[4];
     match first_marker {
-        0x00 | 0xff => return true, // OK or ERR — single packet response
-        _ => {} // ResultSet — need to find trailing EOF
+        0x00 | 0xff => return true,
+        _ => {}
     }
-    // Scan for the last complete packet and check if it's EOF
     let mut pos = 0;
     let mut last_marker = 0u8;
     let mut last_pkt_len = 0usize;
     while pos + 4 <= buf.len() {
         let pkt_len = (buf[pos] as usize) | (buf[pos+1] as usize) << 8 | (buf[pos+2] as usize) << 16;
         let end = pos + 4 + pkt_len;
-        if end > buf.len() { break; } // incomplete packet
+        if end > buf.len() { break; }
         if pkt_len > 0 {
             last_marker = buf[pos + 4];
             last_pkt_len = pkt_len;
         }
         pos = end;
     }
-    // EOF packet: marker 0xfe with payload < 9 bytes
-    // Also accept OK packet (0x00) as ResultSet terminator (MySQL 5.7+ deprecation)
     (last_marker == 0xfe && last_pkt_len < 9) || (last_marker == 0x00 && last_pkt_len < 16 && pos == buf.len())
 }
 
-/// Strip the CLIENT_SSL (0x0800) capability flag from a MySQL server greeting packet.
-/// This forces the client to use plaintext, allowing the proxy to parse traffic.
-///
-/// MySQL greeting format (Protocol::HandshakeV10):
-///   [4-byte header][protocol_version(1)][server_version(null-terminated)]
-///   [thread_id(4)][auth_plugin_data_part1(8)][filler(1)]
-///   [capability_flags_lower(2)] <-- we clear bit 11 (0x0800) here
-///   ...
 fn strip_mysql_ssl_flag(packet: &mut Vec<u8>) {
-    if packet.len() < 5 {
-        return;
-    }
-    // Skip 4-byte header
+    if packet.len() < 5 { return; }
     let payload = &mut packet[4..];
-    if payload.is_empty() || payload[0] != 10 {
-        // Not a HandshakeV10 packet
-        return;
-    }
-    // Skip protocol version (1 byte)
+    if payload.is_empty() || payload[0] != 10 { return; }
     let mut pos = 1;
-    // Skip server version (null-terminated string)
-    while pos < payload.len() && payload[pos] != 0 {
-        pos += 1;
-    }
-    pos += 1; // skip null terminator
-    // Skip thread_id (4 bytes)
-    pos += 4;
-    // Skip auth_plugin_data_part_1 (8 bytes)
-    pos += 8;
-    // Skip filler (1 byte)
+    while pos < payload.len() && payload[pos] != 0 { pos += 1; }
     pos += 1;
-    // Now at capability_flags_lower (2 bytes, little-endian)
-    if pos + 2 > payload.len() {
-        return;
-    }
+    pos += 4;
+    pos += 8;
+    pos += 1;
+    if pos + 2 > payload.len() { return; }
     let cap_lower = u16::from_le_bytes([payload[pos], payload[pos + 1]]);
-    // Clear CLIENT_SSL flag (bit 11 = 0x0800)
     let cap_lower_new = cap_lower & !0x0800;
     payload[pos] = (cap_lower_new & 0xff) as u8;
     payload[pos + 1] = ((cap_lower_new >> 8) & 0xff) as u8;
-    debug!(original = format!("0x{:04x}", cap_lower), modified = format!("0x{:04x}", cap_lower_new), "stripped SSL from MySQL greeting");
 }

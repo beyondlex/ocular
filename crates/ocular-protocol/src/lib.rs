@@ -6,17 +6,22 @@ pub use mysql::{parse_mysql_request, parse_mysql_response};
 
 use std::time::{Duration, SystemTime};
 
-/// A parsed middleware event
+/// A single request→response event (merged)
 #[derive(Debug, Clone)]
 pub struct ProxyEvent {
     pub timestamp: SystemTime,
     pub component: String,
     pub protocol: Protocol,
-    pub direction: Direction,
-    pub summary: String,
-    pub raw: Vec<u8>,
-    /// Latency from request to response (only present on response events)
-    pub latency: Option<Duration>,
+    /// The command/SQL sent (request summary, truncated for display)
+    pub command: String,
+    /// Full command extracted from raw request (no truncation)
+    pub full_command: String,
+    /// Response summary (e.g. "OK", "ResultSet (19 rows, ...)")
+    pub response: String,
+    /// Formatted response detail for the detail panel
+    pub response_detail: String,
+    /// Request→response latency
+    pub latency: Duration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,7 +46,7 @@ impl Protocol {
     }
 }
 
-/// Parse request bytes, returning a human-readable summary
+/// Parse request bytes, returning a human-readable summary (truncated)
 pub fn parse_request(protocol: Protocol, buf: &[u8]) -> Option<String> {
     match protocol {
         Protocol::Redis => {
@@ -65,7 +70,6 @@ pub fn extract_full_command(protocol: Protocol, buf: &[u8]) -> Option<String> {
             if buf.len() < 4 + payload_len || payload_len <= 1 { return None; }
             let cmd = buf[4];
             if cmd == 0x03 || cmd == 0x16 {
-                // COM_QUERY or COM_STMT_PREPARE: payload is SQL text
                 Some(String::from_utf8_lossy(&buf[5..4 + payload_len]).to_string())
             } else {
                 parse_mysql_request(buf).map(|pkt| pkt.to_summary())
@@ -74,7 +78,7 @@ pub fn extract_full_command(protocol: Protocol, buf: &[u8]) -> Option<String> {
     }
 }
 
-/// Parse response bytes, returning a human-readable summary
+/// Parse response bytes, returning a short summary
 pub fn parse_response(protocol: Protocol, buf: &[u8]) -> Option<String> {
     match protocol {
         Protocol::Redis => {

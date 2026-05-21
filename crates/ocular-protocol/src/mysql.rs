@@ -336,7 +336,7 @@ mod tests {
         pkt.extend_from_slice(sql);
         let result = parse_mysql_request(&pkt).unwrap();
         assert_eq!(result.command, MysqlCommand::Query);
-        assert_eq!(result.to_summary(), "QUERY SELECT 1");
+        assert_eq!(result.to_summary(), "SELECT 1");
     }
 
     #[test]
