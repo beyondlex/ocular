@@ -133,26 +133,33 @@ pub fn parse_mysql_response(buf: &[u8]) -> Option<MysqlResponse> {
 
 impl MysqlPacket {
     pub fn to_summary(&self) -> String {
-        let cmd = match self.command {
-            MysqlCommand::Query => "QUERY",
-            MysqlCommand::StmtPrepare => "PREPARE",
-            MysqlCommand::StmtExecute => "EXECUTE",
-            MysqlCommand::StmtClose => "STMT_CLOSE",
-            MysqlCommand::Ping => "PING",
-            MysqlCommand::Quit => "QUIT",
-            MysqlCommand::InitDb => "USE",
-            MysqlCommand::FieldList => "FIELD_LIST",
-            MysqlCommand::Other(c) => return format!("CMD(0x{:02x})", c),
-        };
-        if self.payload.is_empty() || self.payload == cmd {
-            cmd.to_string()
-        } else {
-            // Truncate long queries for summary
-            let truncated: String = self.payload.chars().take(120).collect();
-            if truncated.len() < self.payload.len() {
-                format!("{} {}...", cmd, truncated)
-            } else {
-                format!("{} {}", cmd, self.payload)
+        match self.command {
+            MysqlCommand::Query => {
+                // Show SQL directly, truncated
+                let truncated: String = self.payload.chars().take(120).collect();
+                if truncated.len() < self.payload.len() {
+                    format!("{}...", truncated)
+                } else {
+                    truncated
+                }
+            }
+            _ => {
+                let cmd = match self.command {
+                    MysqlCommand::StmtPrepare => "PREPARE",
+                    MysqlCommand::StmtExecute => "EXECUTE",
+                    MysqlCommand::StmtClose => "STMT_CLOSE",
+                    MysqlCommand::Ping => "PING",
+                    MysqlCommand::Quit => "QUIT",
+                    MysqlCommand::InitDb => "USE",
+                    MysqlCommand::FieldList => "FIELD_LIST",
+                    MysqlCommand::Other(c) => return format!("CMD(0x{:02x})", c),
+                    MysqlCommand::Query => unreachable!(),
+                };
+                if self.payload.is_empty() || self.payload == cmd {
+                    cmd.to_string()
+                } else {
+                    format!("{} {}", cmd, self.payload)
+                }
             }
         }
     }
