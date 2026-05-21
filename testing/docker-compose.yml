@@ -1,0 +1,50 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  mysql:
+    image: mysql:8
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: testdb
+      MYSQL_ROOT_HOST: '%'
+    command: --mysql-native-password=ON
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+
+  redis-client:
+    image: redis:7-alpine
+    depends_on:
+      - redis
+    volumes:
+      - ./redis_crud.sh:/crud.sh:ro
+    entrypoint: ["sh", "/crud.sh"]
+    environment:
+      - REDIS_HOST=host.docker.internal
+      - REDIS_PORT=16379
+      - INTERVAL=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles: ["client"]
+
+  mysql-client:
+    image: mysql:8
+    depends_on:
+      - mysql
+    volumes:
+      - ./mysql_crud.sh:/crud.sh:ro
+    entrypoint: ["sh", "/crud.sh"]
+    environment:
+      - MYSQL_HOST=host.docker.internal
+      - MYSQL_PORT=13306
+      - MYSQL_USER=root
+      - MYSQL_PASS=root
+      - MYSQL_DB=testdb
+      - INTERVAL=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles: ["client"]
