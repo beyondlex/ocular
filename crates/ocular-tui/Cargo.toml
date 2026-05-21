@@ -8,5 +8,6 @@ crossterm.workspace = true
 ratatui.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
+chrono = "0.4"
 ocular-proxy = { path = "../ocular-proxy" }
 ocular-protocol = { path = "../ocular-protocol" }

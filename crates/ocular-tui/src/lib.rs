@@ -19,9 +19,14 @@ pub struct ComponentInfo {
     pub listen: String,
 }
 
+#[derive(PartialEq)]
+enum Focus { Events, Detail }
+
 struct App {
     events: Vec<ProxyEvent>,
     selected: usize,
+    detail_scroll: u16,
+    focus: Focus,
     components: Vec<ComponentInfo>,
 }
 
@@ -36,14 +41,17 @@ pub async fn run(
     let mut app = App {
         events: Vec::new(),
         selected: 0,
+        detail_scroll: 0,
+        focus: Focus::Events,
         components,
     };
 
     loop {
         while let Ok(ev) = rx.try_recv() {
             app.events.push(ev);
-            // 自动跟踪最新事件
-            app.selected = app.events.len().saturating_sub(1);
+            if app.focus == Focus::Events {
+                app.selected = app.events.len().saturating_sub(1);
+            }
         }
 
         terminal.draw(|f| ui(f, &app))?;
@@ -53,14 +61,26 @@ pub async fn run(
                 if key.kind != KeyEventKind::Press { continue; }
                 match key.code {
                     KeyCode::Char('q') => break,
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        app.selected = app.selected.saturating_sub(1);
+                    KeyCode::Tab => {
+                        app.focus = match app.focus {
+                            Focus::Events => Focus::Detail,
+                            Focus::Detail => Focus::Events,
+                        };
+                        app.detail_scroll = 0;
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if app.selected + 1 < app.events.len() {
-                            app.selected += 1;
+                    KeyCode::Up | KeyCode::Char('k') => match app.focus {
+                        Focus::Events => { app.selected = app.selected.saturating_sub(1); app.detail_scroll = 0; }
+                        Focus::Detail => { app.detail_scroll = app.detail_scroll.saturating_sub(1); }
+                    },
+                    KeyCode::Down | KeyCode::Char('j') => match app.focus {
+                        Focus::Events => {
+                            if app.selected + 1 < app.events.len() {
+                                app.selected += 1;
+                                app.detail_scroll = 0;
+                            }
                         }
-                    }
+                        Focus::Detail => { app.detail_scroll += 1; }
+                    },
                     _ => {}
                 }
             }
@@ -70,6 +90,22 @@ pub async fn run(
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
     Ok(())
+}
+
+fn format_time(ts: &std::time::SystemTime) -> String {
+    let dt: chrono::DateTime<chrono::Local> = (*ts).into();
+    dt.format("%H:%M:%S%.3f").to_string()
+}
+
+fn format_latency(d: &Duration) -> String {
+    let us = d.as_micros();
+    if us < 1000 {
+        format!("{}μs", us)
+    } else if us < 1_000_000 {
+        format!("{:.1}ms", us as f64 / 1000.0)
+    } else {
+        format!("{:.2}s", d.as_secs_f64())
+    }
 }
 
 fn ui(f: &mut Frame, app: &App) {
@@ -89,11 +125,12 @@ fn ui(f: &mut Frame, app: &App) {
     // 右侧上下分割
     let right = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
-        .constraints([Constraint::Percentage(65), Constraint::Percentage(35)])
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
         .split(chunks[1]);
 
     // 事件流
-    let visible_start = app.selected.saturating_sub(right[0].height as usize);
+    let events_focused = app.focus == Focus::Events;
+    let visible_start = app.selected.saturating_sub(right[0].height.saturating_sub(2) as usize);
     let event_items: Vec<ListItem> = app.events.iter().enumerate()
         .skip(visible_start)
         .map(|(i, ev)| {
@@ -101,27 +138,39 @@ fn ui(f: &mut Frame, app: &App) {
                 ocular_protocol::Direction::Request => "→",
                 ocular_protocol::Direction::Response => "←",
             };
+            let time = format_time(&ev.timestamp);
+            let lat = ev.latency.as_ref().map(|d| format!(" ({})", format_latency(d))).unwrap_or_default();
+            let line = format!(" {} {} [{}] {}{}", time, arrow, ev.component, ev.summary, lat);
             let style = if i == app.selected {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else {
                 Style::default()
             };
-            ListItem::new(format!(" {} [{}] {}", arrow, ev.component, ev.summary)).style(style)
+            ListItem::new(line).style(style)
         }).collect();
+    let events_border_style = if events_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
     let event_list = List::new(event_items)
-        .block(Block::default().borders(Borders::ALL).title(" Events (j/k navigate, q quit) "));
+        .block(Block::default().borders(Borders::ALL).border_style(events_border_style)
+            .title(" Events (Tab switch, j/k navigate, q quit) "));
     f.render_widget(event_list, right[0]);
 
     // 详情面板
+    let detail_focused = app.focus == Focus::Detail;
     let detail = if let Some(ev) = app.events.get(app.selected) {
-        format!("Component: {}\nDirection: {:?}\nCommand:   {}\n\nRaw bytes ({} B):\n{}",
-            ev.component, ev.direction, ev.summary, ev.raw.len(),
-            String::from_utf8_lossy(&ev.raw))
+        let lat_str = ev.latency.as_ref().map(|d| format_latency(d)).unwrap_or_else(|| "-".into());
+        let raw_display = String::from_utf8_lossy(&ev.raw)
+            .replace("\r\n", "\\r\\n\n");
+        format!("Time:      {}\nComponent: {}\nDirection: {:?}\nLatency:   {}\nCommand:   {}\n\nRaw ({} bytes):\n{}",
+            format_time(&ev.timestamp), ev.component, ev.direction, lat_str,
+            ev.summary, ev.raw.len(), raw_display)
     } else {
         "No events yet. Waiting for traffic...".to_string()
     };
+    let detail_border_style = if detail_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
+    let title = if detail_focused { " Detail (j/k scroll) " } else { " Detail (Tab to focus) " };
     let detail_widget = Paragraph::new(detail)
         .wrap(Wrap { trim: false })
-        .block(Block::default().borders(Borders::ALL).title(" Detail "));
+        .scroll((app.detail_scroll, 0))
+        .block(Block::default().borders(Borders::ALL).border_style(detail_border_style).title(title));
     f.render_widget(detail_widget, right[1]);
 }
