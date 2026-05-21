@@ -267,11 +267,17 @@ fn ui(f: &mut Frame, app: &App) {
     let filtered = app.filtered_events();
     let events_focused = app.focus == Focus::Events;
     let visible_height = right[0].height.saturating_sub(2) as usize;
-    let visible_start = app.selected.saturating_sub(visible_height);
+    // Ensure selected item is always within the visible window with margin
+    let scroll_margin: usize = 3;
+    let visible_start = if app.selected + scroll_margin < visible_height {
+        0
+    } else {
+        app.selected + scroll_margin - visible_height + 1
+    };
     let event_items: Vec<ListItem> = filtered.iter().enumerate()
         .skip(visible_start)
         .take(visible_height)
-        .map(|(display_idx, (_orig_idx, ev))| {
+        .map(|(idx, (_orig_idx, ev))| {
             let arrow = match ev.direction {
                 ocular_protocol::Direction::Request => "→",
                 ocular_protocol::Direction::Response => "←",
@@ -279,7 +285,7 @@ fn ui(f: &mut Frame, app: &App) {
             let time = format_time(&ev.timestamp);
             let lat = ev.latency.as_ref().map(|d| format!(" ({})", format_latency(d))).unwrap_or_default();
             let line = format!(" {} {} [{}] {}{}", time, arrow, ev.component, ev.summary, lat);
-            let style = if display_idx == app.selected {
+            let style = if idx == app.selected {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else {
                 Style::default()
