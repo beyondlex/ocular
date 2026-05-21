@@ -196,7 +196,13 @@ pub async fn run(
                         app.pending_keys.clear();
                         let filtered = app.filtered_events();
                         if let Some((_, ev)) = filtered.get(app.selected) {
-                            copy_to_clipboard(&ev.summary);
+                            let text = if ev.direction == ocular_protocol::Direction::Request {
+                                ocular_protocol::extract_full_command(ev.protocol, &ev.raw)
+                                    .unwrap_or_else(|| ev.summary.clone())
+                            } else {
+                                ev.summary.clone()
+                            };
+                            copy_to_clipboard(&text);
                         }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
