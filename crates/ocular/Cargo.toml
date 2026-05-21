@@ -17,3 +17,4 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 ocular-proxy = { path = "../ocular-proxy" }
 ocular-tui = { path = "../ocular-tui" }
+ocular-protocol = { path = "../ocular-protocol" }

@@ -471,6 +471,7 @@ name = "ocular"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "ocular-protocol",
  "ocular-proxy",
  "ocular-tui",
  "serde",

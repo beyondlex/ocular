@@ -50,8 +50,13 @@ async fn main() -> Result<()> {
     for proxy_cfg in &config.proxy {
         let tx = tx.clone();
         let cfg = proxy_cfg.clone();
+        let protocol = ocular_protocol::Protocol::from_str(&cfg.protocol)
+            .unwrap_or_else(|| {
+                tracing::warn!(protocol = %cfg.protocol, "unknown protocol, defaulting to redis");
+                ocular_protocol::Protocol::Redis
+            });
         tokio::spawn(async move {
-            if let Err(e) = ocular_proxy::run_proxy(cfg.listen, cfg.remote, cfg.name, tx).await {
+            if let Err(e) = ocular_proxy::run_proxy(cfg.listen, cfg.remote, cfg.name, protocol, tx).await {
                 tracing::error!(error = %e, "proxy fatal error");
             }
         });

@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-/// Redis RESP 值
+/// Redis RESP value
 #[derive(Debug, Clone, PartialEq)]
 pub enum RespValue {
     Simple(String),
@@ -11,7 +11,7 @@ pub enum RespValue {
 }
 
 impl RespValue {
-    /// 将 RESP 命令格式化为可读字符串，如 "SET key value"
+    /// Format a RESP command as a readable string, e.g. "SET key value"
     pub fn to_command_string(&self) -> String {
         match self {
             RespValue::Array(Some(parts)) => {
@@ -29,7 +29,7 @@ impl RespValue {
     }
 }
 
-/// 从字节流中解析一个完整的 RESP 值，返回 (解析结果, 消耗的字节数)
+/// Parse a complete RESP value from a byte buffer. Returns (value, bytes consumed).
 pub fn parse_resp(buf: &[u8]) -> Result<Option<(RespValue, usize)>> {
     if buf.is_empty() {
         return Ok(None);
