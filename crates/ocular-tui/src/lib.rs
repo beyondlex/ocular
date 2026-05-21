@@ -139,13 +139,19 @@ pub async fn run(
                     }
                     KeyCode::Esc => {
                         app.pending_keys.clear();
-                        if !app.filter.is_empty() {
+                        if app.focus == Focus::Detail {
+                            app.focus = Focus::Events;
+                        } else if !app.filter.is_empty() {
                             app.filter.clear();
+                            app.selected = 0;
+                            app.focus = Focus::Events;
+                        } else if app.visual_mode {
+                            app.visual_mode = false;
                         } else {
                             app.component_idx = None;
+                            app.selected = 0;
+                            app.focus = Focus::Events;
                         }
-                        app.selected = 0;
-                        app.focus = Focus::Events;
                     }
                     KeyCode::Tab => {
                         app.pending_keys.clear();
@@ -299,6 +305,9 @@ pub async fn run(
                         if app.focus == Focus::Components {
                             app.focus = Focus::Events;
                             app.selected = 0;
+                        } else if app.focus == Focus::Events {
+                            app.focus = Focus::Detail;
+                            app.detail_scroll = 0;
                         }
                     }
                     _ => { app.pending_keys.clear(); }
