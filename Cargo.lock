@@ -509,6 +509,7 @@ dependencies = [
  "ocular-protocol",
  "ocular-proxy",
  "ratatui",
+ "serde",
  "tokio",
 ]
 

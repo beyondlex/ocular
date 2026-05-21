@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 mod theme;
-pub use theme::Theme;
+pub use theme::{Theme, ThemeConfig};
 
 #[derive(Debug, Clone)]
 pub struct ComponentInfo {
@@ -37,6 +37,7 @@ struct App {
     leader_active: bool,
     visual_mode: bool,
     visual_anchor: usize, // start of visual selection
+    theme: Theme,
 }
 
 impl App {
@@ -62,6 +63,7 @@ impl App {
 pub async fn run(
     mut rx: broadcast::Receiver<ProxyEvent>,
     components: Vec<ComponentInfo>,
+    theme: Theme,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -79,6 +81,7 @@ pub async fn run(
         leader_active: false,
         visual_mode: false,
         visual_anchor: 0,
+        theme,
     };
 
     loop {
@@ -357,7 +360,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     } else {
         app.selected + scroll_margin - visible_height + 1
     };
-    let theme = Theme::default();
+    let theme = &app.theme;
     let event_items: Vec<ListItem> = filtered.iter().enumerate()
         .skip(visible_start)
         .take(visible_height)

@@ -1,5 +1,16 @@
 # Ocular configuration
-# Each [[proxy]] defines a middleware proxy to monitor
+
+# Theme: "default", "tokyo-night-storm", "dracula", "solarized-light", "solarized-dark"
+theme = "tokyo-night-storm"
+# theme = "dracula"
+
+# Optional: override individual theme elements
+# [theme_overrides]
+# timestamp = { fg = "#888888" }
+# component_redis = { fg = "#ff8c00", bold = true }
+# component_mysql = { fg = "#5080ff", bold = true }
+# command = { fg = "#ffffff" }
+# selected = { fg = "#ffffff", bg = "#333355" }
 
 [[proxy]]
 name = "redis"

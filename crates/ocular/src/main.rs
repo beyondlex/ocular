@@ -9,6 +9,10 @@ use tracing_subscriber::{fmt, EnvFilter};
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub proxy: Vec<ProxyConfig>,
+    #[serde(default)]
+    pub theme: Option<String>,
+    #[serde(default)]
+    pub theme_overrides: Option<ocular_tui::ThemeConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -67,5 +71,12 @@ async fn main() -> Result<()> {
         ocular_tui::ComponentInfo { name: p.name.clone(), listen: p.listen.clone() }
     }).collect();
 
-    ocular_tui::run(rx, components).await
+    let base_theme = ocular_tui::Theme::by_name(config.theme.as_deref().unwrap_or("default"));
+    let theme = if let Some(ref overrides) = config.theme_overrides {
+        ocular_tui::Theme::from_config(overrides, &base_theme)
+    } else {
+        base_theme
+    };
+
+    ocular_tui::run(rx, components, theme).await
 }
