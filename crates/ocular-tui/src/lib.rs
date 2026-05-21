@@ -192,6 +192,13 @@ pub async fn run(
                     KeyCode::Char(c @ '0'..='9') if app.focus == Focus::Events => {
                         app.pending_keys.push(c);
                     }
+                    KeyCode::Char('y') if app.focus == Focus::Events || app.focus == Focus::Detail => {
+                        app.pending_keys.clear();
+                        let filtered = app.filtered_events();
+                        if let Some((_, ev)) = filtered.get(app.selected) {
+                            copy_to_clipboard(&ev.summary);
+                        }
+                    }
                     KeyCode::Up | KeyCode::Char('k') => {
                         app.pending_keys.clear();
                         match app.focus {
@@ -443,5 +450,36 @@ fn ui(f: &mut Frame, app: &mut App) {
         let popup = Paragraph::new(menu_lines)
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)));
         f.render_widget(popup, popup_area);
+    }
+}
+
+fn copy_to_clipboard(text: &str) {
+    use std::process::{Command, Stdio};
+    use std::io::Write;
+    // macOS: pbcopy, Linux: xclip or wl-copy
+    let mut child = if cfg!(target_os = "macos") {
+        Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    } else {
+        Command::new("xclip")
+            .args(["-selection", "clipboard"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .or_else(|_| Command::new("wl-copy")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn())
+    };
+    if let Ok(ref mut child) = child {
+        if let Some(ref mut stdin) = child.stdin {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
     }
 }
