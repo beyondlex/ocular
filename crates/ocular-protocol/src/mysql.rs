@@ -52,8 +52,8 @@ pub fn parse_mysql_request(buf: &[u8]) -> Option<MysqlPacket> {
     let data = &buf[5..4 + payload_len];
 
     let (command, payload) = match cmd_byte {
-        0x03 => (MysqlCommand::Query, String::from_utf8_lossy(data).to_string()),
-        0x16 => (MysqlCommand::StmtPrepare, String::from_utf8_lossy(data).to_string()),
+        0x03 => (MysqlCommand::Query, String::from_utf8_lossy(data).replace(|c: char| c.is_control(), "")),
+        0x16 => (MysqlCommand::StmtPrepare, String::from_utf8_lossy(data).replace(|c: char| c.is_control(), "")),
         0x17 => {
             let stmt_id = if data.len() >= 4 {
                 u32::from_le_bytes([data[0], data[1], data[2], data[3]])

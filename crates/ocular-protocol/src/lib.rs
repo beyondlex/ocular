@@ -72,7 +72,8 @@ pub fn extract_full_command(protocol: Protocol, buf: &[u8]) -> Option<String> {
             if buf.len() < 4 + payload_len || payload_len <= 1 { return None; }
             let cmd = buf[4];
             if cmd == 0x03 || cmd == 0x16 {
-                Some(String::from_utf8_lossy(&buf[5..4 + payload_len]).to_string())
+                let sql = String::from_utf8_lossy(&buf[5..4 + payload_len]);
+                Some(sql.replace(|c: char| c.is_control(), ""))
             } else {
                 parse_mysql_request(buf).map(|pkt| pkt.to_summary())
             }
