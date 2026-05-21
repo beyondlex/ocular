@@ -1,7 +1,7 @@
 #!/bin/sh
 set -e
 
-REPO="lex/ocular"
+REPO="beyondlex/ocular"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ocular"
 CONFIG_FILE="$CONFIG_DIR/ocular.toml"
