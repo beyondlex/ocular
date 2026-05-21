@@ -416,28 +416,48 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Detail panel
     let detail_focused = app.focus == Focus::Detail;
     let selected_event = filtered.get(app.selected).map(|(_, ev)| *ev);
-    let detail = if let Some(ev) = selected_event {
+    let detail_text: Text = if let Some(ev) = selected_event {
         let formatted_cmd = if ev.protocol == ocular_protocol::Protocol::Mysql {
             format_sql(&ev.full_command)
         } else {
             ev.full_command.clone()
         };
-        format!("Command:\n{}\n\nResponse:  {}\nLatency:   {}\nTime:      {}\nComponent: {}\n\n{}",
-            formatted_cmd, ev.response, format_latency(&ev.latency),
-            format_time(&ev.timestamp), ev.component, ev.response_detail)
+        let header = format!("Response:  {}\nLatency:   {}\nTime:      {}\nComponent: {}\n",
+            ev.response, format_latency(&ev.latency),
+            format_time(&ev.timestamp), ev.component);
+
+        let mut lines: Vec<Line> = vec![Line::from(Span::styled("Command:", Style::default().fg(Color::Cyan)))];
+        // SQL highlighted lines
+        for sql_line in formatted_cmd.lines() {
+            lines.push(highlight_sql_line(sql_line));
+        }
+        lines.push(Line::from(""));
+        // Header lines (plain)
+        for h in header.lines() {
+            lines.push(Line::from(h.to_string()));
+        }
+        lines.push(Line::from(""));
+        // Response detail
+        for rd in ev.response_detail.lines() {
+            lines.push(Line::from(rd.to_string()));
+        }
+        Text::from(lines)
     } else {
-        "No events yet. Waiting for traffic...".to_string()
+        Text::from("No events yet. Waiting for traffic...")
     };
+    let detail_str_for_scroll: String = detail_text.lines.iter()
+        .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+        .collect::<Vec<_>>().join("\n");
     let detail_border = if detail_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
     let title = if detail_focused { " Detail (j/k scroll, y copy) " } else { " Detail " };
     // Clamp scroll
     let detail_view_width = right[1].width.saturating_sub(2).max(1) as usize;
-    let wrapped_lines: u16 = detail.lines()
+    let wrapped_lines: u16 = detail_str_for_scroll.lines()
         .map(|l| ((l.chars().count().max(1) + detail_view_width - 1) / detail_view_width) as u16)
         .sum();
     let max_scroll = wrapped_lines.saturating_sub(1);
     app.detail_scroll = app.detail_scroll.min(max_scroll);
-    let detail_widget = Paragraph::new(detail)
+    let detail_widget = Paragraph::new(detail_text)
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0))
         .block(Block::default().borders(Borders::ALL).border_style(detail_border).title(title));
@@ -530,4 +550,62 @@ fn open_in_editor(text: &str) {
     let _ = std::process::Command::new(&editor)
         .arg(&tmp)
         .status();
+}
+
+fn highlight_sql_line(line: &str) -> Line<'static> {
+    let keywords: &[&str] = &[
+        "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "ON", "AS",
+        "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "FULL",
+        "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE",
+        "CREATE", "ALTER", "DROP", "TABLE", "INDEX", "VIEW",
+        "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET",
+        "UNION", "ALL", "DISTINCT", "EXISTS", "BETWEEN", "LIKE",
+        "IS", "NULL", "TRUE", "FALSE", "CASE", "WHEN", "THEN", "ELSE", "END",
+        "ASC", "DESC", "COUNT", "SUM", "AVG", "MIN", "MAX",
+    ];
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut remaining = line;
+
+    while !remaining.is_empty() {
+        // Skip leading whitespace
+        let ws_len = remaining.len() - remaining.trim_start().len();
+        if ws_len > 0 {
+            spans.push(Span::raw(remaining[..ws_len].to_string()));
+            remaining = &remaining[ws_len..];
+            continue;
+        }
+        // Try to match a word
+        let word_len = remaining.chars().take_while(|c| c.is_alphanumeric() || *c == '_').count();
+        if word_len > 0 {
+            let word = &remaining[..word_len];
+            if keywords.contains(&word.to_uppercase().as_str()) && word.chars().all(|c| c.is_uppercase() || c == '_') {
+                spans.push(Span::styled(word.to_string(), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)));
+            } else if word.chars().all(|c| c.is_ascii_digit()) {
+                spans.push(Span::styled(word.to_string(), Style::default().fg(Color::Yellow)));
+            } else {
+                spans.push(Span::styled(word.to_string(), Style::default().fg(Color::White)));
+            }
+            remaining = &remaining[word_len..];
+        } else {
+            // Single character (operator, punctuation, quote)
+            let ch = remaining.chars().next().unwrap();
+            let ch_len = ch.len_utf8();
+            let style = match ch {
+                '\'' | '"' => {
+                    // String literal: consume until matching quote
+                    let end = remaining[ch_len..].find(ch).map(|i| i + ch_len + ch_len).unwrap_or(remaining.len());
+                    let s = remaining[..end].to_string();
+                    remaining = &remaining[end..];
+                    spans.push(Span::styled(s, Style::default().fg(Color::Green)));
+                    continue;
+                }
+                '(' | ')' | ',' | ';' => Style::default().fg(Color::DarkGray),
+                '=' | '<' | '>' | '!' | '+' | '-' | '*' => Style::default().fg(Color::Cyan),
+                _ => Style::default().fg(Color::White),
+            };
+            spans.push(Span::styled(remaining[..ch_len].to_string(), style));
+            remaining = &remaining[ch_len..];
+        }
+    }
+    Line::from(spans)
 }
