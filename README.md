@@ -47,10 +47,15 @@ Your App ──→ Ocular Proxy (16379) ──→ Redis (6379)
 ```bash
 # Build
 cargo build --release
-
-# Configure (edit ocular.toml)
-cat ocular.toml
 ```
+
+### Configuration
+
+Ocular looks for `ocular.toml` in the following order:
+
+1. `./ocular.toml` (current directory)
+2. `$XDG_CONFIG_HOME/ocular/ocular.toml`
+3. `~/.config/ocular/ocular.toml`
 
 ```toml
 [[proxy]]
