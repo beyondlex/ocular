@@ -281,7 +281,7 @@ fn parse_resultset_packets(buf: &[u8], col_count: usize) -> (Vec<String>, Vec<Ve
     }
 
     // Read row packets (text protocol: each field is a lenenc_str)
-    let max_rows = 50; // limit for display
+    let max_rows = 10000; // parse all, truncate at display time
     loop {
         if pos + 4 >= buf.len() { break; }
         let pkt_len = (buf[pos] as usize) | (buf[pos+1] as usize) << 8 | (buf[pos+2] as usize) << 16;

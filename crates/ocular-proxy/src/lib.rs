@@ -110,29 +110,53 @@ async fn handle_conn(
 
     let server_to_client = async move {
         let mut buf = [0u8; 65536];
+        let mut mysql_buf: Vec<u8> = Vec::new();
+        let mut awaiting_response = false; // MySQL: collecting response packets
         loop {
             let n = sr.read(&mut buf).await?;
             if n == 0 { break; }
             let data = &buf[..n];
-            if let Some(summary) = parse_response(protocol, data) {
-                let latency = req_time_r.lock().await.take().map(|t| t.elapsed());
-                // For MySQL, only emit response if there was a matching request
-                if protocol == Protocol::Mysql && latency.is_none() {
-                    cw.write_all(data).await?;
-                    continue;
-                }
-                debug!(component = %name_resp, direction = "response", %summary, ?latency);
-                let _ = tx_resp.send(ProxyEvent {
-                    timestamp: SystemTime::now(),
-                    component: name_resp.clone(),
-                    protocol,
-                    direction: Direction::Response,
-                    summary,
-                    raw: data.to_vec(),
-                    latency,
-                });
-            }
             cw.write_all(data).await?;
+
+            if protocol == Protocol::Mysql {
+                let has_pending_req = req_time_r.lock().await.is_some();
+                if has_pending_req || awaiting_response {
+                    awaiting_response = true;
+                    mysql_buf.extend_from_slice(data);
+                    // Check if we've received the complete response (EOF/OK packet at end)
+                    if mysql_response_complete(&mysql_buf) {
+                        let latency = req_time_r.lock().await.take().map(|t| t.elapsed());
+                        if let Some(summary) = parse_response(protocol, &mysql_buf) {
+                            debug!(component = %name_resp, direction = "response", %summary, ?latency);
+                            let _ = tx_resp.send(ProxyEvent {
+                                timestamp: SystemTime::now(),
+                                component: name_resp.clone(),
+                                protocol,
+                                direction: Direction::Response,
+                                summary,
+                                raw: mysql_buf.clone(),
+                                latency,
+                            });
+                        }
+                        mysql_buf.clear();
+                        awaiting_response = false;
+                    }
+                }
+            } else {
+                if let Some(summary) = parse_response(protocol, data) {
+                    let latency = req_time_r.lock().await.take().map(|t| t.elapsed());
+                    debug!(component = %name_resp, direction = "response", %summary, ?latency);
+                    let _ = tx_resp.send(ProxyEvent {
+                        timestamp: SystemTime::now(),
+                        component: name_resp.clone(),
+                        protocol,
+                        direction: Direction::Response,
+                        summary,
+                        raw: data.to_vec(),
+                        latency,
+                    });
+                }
+            }
         }
         Ok::<_, anyhow::Error>(())
     };
@@ -142,6 +166,38 @@ async fn handle_conn(
         r = server_to_client => r?,
     }
     Ok(())
+}
+
+/// Check if a MySQL response buffer contains a complete response.
+/// A response is complete when:
+/// - It's an OK packet (marker 0x00, seq >= 1, small payload)
+/// - It's an ERR packet (marker 0xff)
+/// - It's a ResultSet that ends with an EOF packet (marker 0xfe, payload < 9 bytes)
+fn mysql_response_complete(buf: &[u8]) -> bool {
+    if buf.len() < 5 { return false; }
+    // Check the first packet to determine response type
+    let first_marker = buf[4];
+    match first_marker {
+        0x00 | 0xff => return true, // OK or ERR — single packet response
+        _ => {} // ResultSet — need to find trailing EOF
+    }
+    // Scan for the last complete packet and check if it's EOF
+    let mut pos = 0;
+    let mut last_marker = 0u8;
+    let mut last_pkt_len = 0usize;
+    while pos + 4 <= buf.len() {
+        let pkt_len = (buf[pos] as usize) | (buf[pos+1] as usize) << 8 | (buf[pos+2] as usize) << 16;
+        let end = pos + 4 + pkt_len;
+        if end > buf.len() { break; } // incomplete packet
+        if pkt_len > 0 {
+            last_marker = buf[pos + 4];
+            last_pkt_len = pkt_len;
+        }
+        pos = end;
+    }
+    // EOF packet: marker 0xfe with payload < 9 bytes
+    // Also accept OK packet (0x00) as ResultSet terminator (MySQL 5.7+ deprecation)
+    (last_marker == 0xfe && last_pkt_len < 9) || (last_marker == 0x00 && last_pkt_len < 16 && pos == buf.len())
 }
 
 /// Strip the CLIENT_SSL (0x0800) capability flag from a MySQL server greeting packet.

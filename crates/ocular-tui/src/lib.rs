@@ -85,7 +85,7 @@ pub async fn run(
             }
         }
 
-        terminal.draw(|f| ui(f, &app))?;
+        terminal.draw(|f| ui(f, &mut app))?;
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -275,7 +275,7 @@ fn sanitize_raw(raw: &[u8], max_bytes: usize) -> String {
     out
 }
 
-fn ui(f: &mut Frame, app: &App) {
+fn ui(f: &mut Frame, app: &mut App) {
     let outer = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -384,6 +384,16 @@ fn ui(f: &mut Frame, app: &App) {
     };
     let detail_border = if detail_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
     let title = if detail_focused { " Detail (j/k scroll) " } else { " Detail " };
+    let detail_view_width = right[1].width.saturating_sub(2).max(1) as usize;
+    // Estimate total rendered lines (accounting for line wrapping)
+    let wrapped_lines: u16 = detail.lines()
+        .map(|l| {
+            let w = l.chars().count().max(1);
+            (((w + detail_view_width - 1) / detail_view_width) as u16).max(1)
+        })
+        .sum();
+    let max_scroll = wrapped_lines.saturating_sub(1);
+    app.detail_scroll = app.detail_scroll.min(max_scroll);
     let detail_widget = Paragraph::new(detail)
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0))
