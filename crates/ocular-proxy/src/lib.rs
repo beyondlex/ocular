@@ -116,6 +116,11 @@ async fn handle_conn(
             let data = &buf[..n];
             if let Some(summary) = parse_response(protocol, data) {
                 let latency = req_time_r.lock().await.take().map(|t| t.elapsed());
+                // For MySQL, only emit response if there was a matching request
+                if protocol == Protocol::Mysql && latency.is_none() {
+                    cw.write_all(data).await?;
+                    continue;
+                }
                 debug!(component = %name_resp, direction = "response", %summary, ?latency);
                 let _ = tx_resp.send(ProxyEvent {
                     timestamp: SystemTime::now(),

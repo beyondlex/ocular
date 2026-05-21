@@ -77,7 +77,8 @@ pub fn parse_mysql_request(buf: &[u8]) -> Option<MysqlPacket> {
             (MysqlCommand::Quit, "QUIT".to_string())
         }
         0x02 => (MysqlCommand::InitDb, String::from_utf8_lossy(data).to_string()),
-        0x04 => (MysqlCommand::FieldList, String::from_utf8_lossy(data).to_string()),
+        // 0x04 COM_FIELD_LIST: auto-completion noise from mysql CLI, skip
+        0x04 => return None,
         // Unknown command bytes during handshake — skip them
         _ => return None,
     };
