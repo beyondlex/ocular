@@ -105,6 +105,7 @@ struct App {
     theme: Theme,
     paused: bool,
     exclude_matchers: std::collections::HashMap<String, ExcludeMatcher>,
+    event_format: EventFormat,
 }
 
 impl App {
@@ -127,6 +128,69 @@ impl App {
     }
 }
 
+/// Event line format template.
+/// Syntax: `%field` or `%{width}field` for fixed width.
+/// Positive width = right-aligned, negative = left-aligned.
+/// Fields: index, time, component, command, latency, process
+#[derive(Debug, Clone)]
+struct EventFormat {
+    segments: Vec<FormatSegment>,
+}
+
+#[derive(Debug, Clone)]
+enum FormatSegment {
+    Literal(String),
+    Field { name: String, width: Option<i32> },
+}
+
+impl EventFormat {
+    fn parse(template: &str) -> Self {
+        let mut segments = Vec::new();
+        let mut chars = template.chars().peekable();
+        let mut literal = String::new();
+
+        while let Some(c) = chars.next() {
+            if c == '%' {
+                if !literal.is_empty() {
+                    segments.push(FormatSegment::Literal(std::mem::take(&mut literal)));
+                }
+                let width = if chars.peek() == Some(&'{') {
+                    chars.next(); // consume '{'
+                    let mut w = String::new();
+                    while let Some(&ch) = chars.peek() {
+                        if ch == '}' { chars.next(); break; }
+                        w.push(ch);
+                        chars.next();
+                    }
+                    w.parse::<i32>().ok()
+                } else {
+                    None
+                };
+                let mut name = String::new();
+                while let Some(&ch) = chars.peek() {
+                    if ch.is_alphanumeric() || ch == '_' {
+                        name.push(ch);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                segments.push(FormatSegment::Field { name, width });
+            } else {
+                literal.push(c);
+            }
+        }
+        if !literal.is_empty() {
+            segments.push(FormatSegment::Literal(literal));
+        }
+        Self { segments }
+    }
+
+    fn default_format() -> Self {
+        Self::parse("%{5}index %time [%{-12}component] %command (%latency)")
+    }
+}
+
 /// Config structure for hot-reload (only the parts we can reload)
 #[derive(Debug, Deserialize)]
 struct ReloadableConfig {
@@ -138,6 +202,8 @@ struct ReloadableConfig {
     theme: Option<String>,
     #[serde(default)]
     theme_overrides: Option<ThemeConfig>,
+    #[serde(default)]
+    event_format: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -165,6 +231,7 @@ pub async fn run(
     components: Vec<ComponentInfo>,
     theme: Theme,
     config_path: PathBuf,
+    event_format: Option<String>,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -174,6 +241,8 @@ pub async fn run(
         .filter(|c| c.exclude.is_some() || c.include.is_some())
         .map(|c| (c.name.clone(), ExcludeMatcher::new(c.exclude.as_ref(), c.include.as_ref())))
         .collect();
+
+    let fmt = event_format.as_deref().map(EventFormat::parse).unwrap_or_else(EventFormat::default_format);
 
     let mut app = App {
         events: Vec::new(),
@@ -190,6 +259,7 @@ pub async fn run(
         theme,
         paused: false,
         exclude_matchers,
+        event_format: fmt,
     };
 
     let mut last_mtime = std::fs::metadata(&config_path).ok()
@@ -249,6 +319,18 @@ pub async fn run(
                         KeyCode::Char('l') => { app.focus = Focus::Events; }
                         KeyCode::Char('c') => { app.events.clear(); app.selected = 0; }
                         KeyCode::Char('p') => { app.paused = !app.paused; }
+                        KeyCode::Char(',') => {
+                            // Open config in $EDITOR
+                            disable_raw_mode()?;
+                            stdout().execute(LeaveAlternateScreen)?;
+                            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+                            let _ = std::process::Command::new(&editor)
+                                .arg(&config_path)
+                                .status();
+                            stdout().execute(EnterAlternateScreen)?;
+                            enable_raw_mode()?;
+                            terminal.clear()?;
+                        }
                         _ => {}
                     }
                     continue;
@@ -510,6 +592,11 @@ fn reload_config(app: &mut App, cfg: &ReloadableConfig) {
     } else {
         base
     };
+
+    // Reload event format
+    app.event_format = cfg.event_format.as_deref()
+        .map(EventFormat::parse)
+        .unwrap_or_else(EventFormat::default_format);
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
@@ -574,16 +661,29 @@ fn ui(f: &mut Frame, app: &mut App) {
         .map(|(idx, (_orig_idx, ev))| {
             let time = format_time(&ev.timestamp);
             let lat = format_latency(&ev.latency);
-            let line = Line::from(vec![
-                Span::styled(format!(" {:>5} ", idx + 1), theme.line_number),
-                Span::styled(time, theme.timestamp),
-                Span::raw(" "),
-                Span::styled(format!("[{}]", ev.component), theme.component_style(&ev.component)),
-                Span::raw(" "),
-                Span::styled(ev.command.clone(), theme.command),
-                Span::raw(" "),
-                Span::styled(format!("({})", lat), theme.latency),
-            ]);
+            let spans: Vec<Span> = app.event_format.segments.iter().map(|seg| {
+                match seg {
+                    FormatSegment::Literal(s) => Span::raw(s.clone()),
+                    FormatSegment::Field { name, width } => {
+                        let (raw, style) = match name.as_str() {
+                            "index" => (format!("{}", idx + 1), theme.line_number),
+                            "time" => (time.clone(), theme.timestamp),
+                            "component" => (format!("{}", ev.component), theme.component_style(&ev.component)),
+                            "command" => (ev.command.clone(), theme.command),
+                            "latency" => (format!("{}", lat), theme.latency),
+                            "process" => (ev.process.clone().unwrap_or_default(), theme.latency),
+                            _ => (String::new(), Style::default()),
+                        };
+                        let formatted = match width {
+                            Some(w) if *w > 0 => format!("{:>width$}", raw, width = *w as usize),
+                            Some(w) if *w < 0 => format!("{:<width$}", raw, width = (-*w) as usize),
+                            _ => raw,
+                        };
+                        Span::styled(formatted, style)
+                    }
+                }
+            }).collect();
+            let line = Line::from(spans);
             let in_visual = app.visual_mode && {
                 let lo = app.visual_anchor.min(app.selected);
                 let hi = app.visual_anchor.max(app.selected);

@@ -15,6 +15,8 @@ pub struct Config {
     pub theme: Option<String>,
     #[serde(default)]
     pub theme_overrides: Option<ocular_tui::ThemeConfig>,
+    #[serde(default)]
+    pub event_format: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -135,5 +137,5 @@ async fn main() -> Result<()> {
         base_theme
     };
 
-    ocular_tui::run(rx, components, theme, config_path).await
+    ocular_tui::run(rx, components, theme, config_path, config.event_format).await
 }

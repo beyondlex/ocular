@@ -171,6 +171,46 @@ Evaluation order: **include match → show** > **exclude match → hide** > **de
 | `case_sensitive` | `false` | Whether matching is case-sensitive |
 | `regex` | `false` | Treat patterns as regular expressions |
 
+## Event Line Format
+
+Customize how each event line is displayed using a template string:
+
+```toml
+event_format = "%{5}index %time [%{-12}component] %command (%latency)"
+```
+
+### Syntax
+
+- `%field` — insert field value
+- `%{N}field` — fixed width of N characters (positive = right-aligned, negative = left-aligned)
+- All other characters are literal
+
+### Available Fields
+
+| Field | Content |
+|-------|---------|
+| `index` | Line number |
+| `time` | Timestamp (local timezone) |
+| `component` | Component name |
+| `command` | Event command/SQL |
+| `latency` | Request→response duration |
+| `process` | Client process info |
+
+### Examples
+
+```toml
+# Default
+event_format = "%{5}index %time [%{-12}component] %command (%latency)"
+
+# Compact — no line number
+event_format = "%time %{-10}component %command (%latency)"
+
+# Minimal — command only
+event_format = "[%{-10}component] %command"
+```
+
+> This setting supports hot-reload — save the config and the format updates immediately.
+
 ## Keybindings
 
 | Key | Action |
