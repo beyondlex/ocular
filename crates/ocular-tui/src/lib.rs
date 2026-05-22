@@ -633,7 +633,15 @@ fn ui(f: &mut Frame, app: &mut App) {
         } else {
             Style::default()
         };
-        ListItem::new(format!("{} 🟢 {} ({})", prefix, c.name, c.listen)).style(style)
+        let addr_style = if selected && comp_focused {
+            Style::default().bg(Color::DarkGray).fg(Color::Rgb(160, 160, 160))
+        } else {
+            Style::default().fg(Color::Rgb(100, 100, 100))
+        };
+        ListItem::new(Line::from(vec![
+            Span::styled(format!("{} {}", prefix, c.name), style),
+            Span::styled(format!(" ({})", c.listen), addr_style),
+        ])).style(style)
     })).collect();
     let comp_border = if comp_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
     let left = List::new(items)
@@ -701,13 +709,22 @@ fn ui(f: &mut Frame, app: &mut App) {
             ListItem::new(line).style(style)
         }).collect();
     let filter_info = if app.filter.is_empty() { String::new() } else { format!(" [filter: {}]", app.filter) };
-    let count_info = format!(" ({}/{})", filtered.len(), app.events.len());
+    let count_info = if !app.filter.is_empty() || app.component_idx.is_some() {
+        format!(" ({}/{})", filtered.len(), app.events.len())
+    } else {
+        String::new()
+    };
     let events_border = if events_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
     let visual_info = if app.visual_mode { " [VISUAL]" } else { "" };
     let paused_info = if app.paused { " ⏸ PAUSED" } else { "" };
+    let mut title_spans = vec![Span::raw(format!(" Events{}", visual_info))];
+    if app.paused {
+        title_spans.push(Span::styled(paused_info, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)));
+    }
+    title_spans.push(Span::raw(format!("{}{} ", filter_info, count_info)));
     let event_list = List::new(event_items)
         .block(Block::default().borders(Borders::TOP | Borders::LEFT | Borders::RIGHT).border_style(events_border)
-            .title(format!(" Events{}{}{}{} ", visual_info, paused_info, filter_info, count_info)));
+            .title(Line::from(title_spans)));
     f.render_widget(event_list, right[0]);
 
     // Detail panel
