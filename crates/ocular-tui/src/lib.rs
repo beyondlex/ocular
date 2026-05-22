@@ -830,7 +830,11 @@ fn ui(f: &mut Frame, app: &mut App) {
     };
     f.render_widget(
         Paragraph::new(status_line)
-            .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::DarkGray))),
+            .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::DarkGray))
+                .title_bottom(Line::from(Span::styled(
+                    format!(" Ocular v{} ", env!("CARGO_PKG_VERSION")),
+                    Style::default().fg(Color::DarkGray),
+                )).alignment(Alignment::Right))),
         outer[1],
     );
 

@@ -76,6 +76,12 @@ fn init_tracing(log_dir: &std::path::Path) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "-v" || a == "--version") {
+        println!("ocular {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let (config, config_dir, config_path) = load_config()?;
     init_tracing(&config_dir);
     info!(proxies = config.proxy.len(), config_dir = %config_dir.display(), "ocular starting");
