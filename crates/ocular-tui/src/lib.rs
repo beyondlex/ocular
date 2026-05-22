@@ -299,6 +299,11 @@ pub async fn run(
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press { continue; }
 
+                // Ctrl+C: force quit regardless of state
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                    break;
+                }
+
                 if app.focus == Focus::Filter {
                     match key.code {
                         KeyCode::Esc => { app.focus = Focus::Events; }
@@ -638,8 +643,10 @@ fn ui(f: &mut Frame, app: &mut App) {
         } else {
             Style::default().fg(Color::Rgb(100, 100, 100))
         };
+        let count = app.events.iter().filter(|ev| ev.component == c.name).count();
         ListItem::new(Line::from(vec![
             Span::styled(format!("{} {}", prefix, c.name), style),
+            Span::styled(format!(" {}", count), addr_style),
             Span::styled(format!(" ({})", c.listen), addr_style),
         ])).style(style)
     })).collect();
