@@ -268,6 +268,32 @@ Logs are written to `ocular.log` in the working directory (not to stdout, to avo
 RUST_LOG=debug ./target/release/ocular
 ```
 
+## Event Log
+
+Record all proxy events to `events.log` (same directory as `ocular.log`) for offline analysis:
+
+```toml
+[event_log]
+enabled = true
+include_response = true
+components = ["redis-cache", "mysql"]
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `true` (when section present) | Enable/disable event logging |
+| `include_response` | `false` | Append response after the command |
+| `components` | `[]` (all) | Only log events from these component names |
+
+Output format:
+
+```
+21:08:43.123 [redis-cache] SET user:1 "hello" (0.45ms) -> OK
+21:08:43.456 [mysql] SELECT * FROM users (1.23ms) -> ResultSet (19 rows, 3 cols)
+```
+
+Without `include_response`, the `-> ...` part is omitted.
+
 ## License
 
 MIT
