@@ -745,40 +745,71 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Detail panel
     let detail_focused = app.focus == Focus::Detail;
     let selected_event = filtered.get(app.selected).map(|(_, ev)| *ev);
-    let detail_text: Text = if let Some(ev) = selected_event {
-        let formatted_cmd = if ev.protocol == ocular_protocol::Protocol::Mysql {
-            format_sql(&ev.full_command)
-        } else {
-            ev.full_command.clone()
-        };
-        let proc_line = ev.process.as_deref().map(|p| format!("Process:   {}\n", p)).unwrap_or_default();
-        let header = if ev.protocol == ocular_protocol::Protocol::Redis {
-            format!("Latency:   {}\nTime:      {}\nComponent: {}\n{}",
-                format_latency(&ev.latency), format_time(&ev.timestamp), ev.component, proc_line)
-        } else {
-            format!("Response:  {}\nLatency:   {}\nTime:      {}\nComponent: {}\n{}",
-                ev.response, format_latency(&ev.latency),
-                format_time(&ev.timestamp), ev.component, proc_line)
-        };
+    let (detail_text, detail_meta): (Text, Line) = if let Some(ev) = selected_event {
+        let mut lines: Vec<Line> = Vec::new();
 
-        let mut lines: Vec<Line> = vec![Line::from(Span::styled("Command:", Style::default().fg(Color::Cyan)))];
-        // SQL highlighted lines
-        for sql_line in formatted_cmd.lines() {
-            lines.push(highlight_sql_line(sql_line));
+        if ev.protocol == ocular_protocol::Protocol::Amqp {
+            // AMQP: distinguish Publish (send) vs Deliver (receive) vs request-response
+            let is_publish = ev.command.contains("Basic.Publish");
+            let is_deliver = ev.command.contains("Basic.Deliver");
+            if is_publish {
+                // Extract body from full_command (after "Body: ")
+                let (via, body) = ev.full_command.split_once("\nBody: ")
+                    .map(|(v, b)| (v.to_string(), b.to_string()))
+                    .unwrap_or_else(|| (ev.full_command.clone(), String::new()));
+                if !body.is_empty() {
+                    lines.push(Line::from(Span::styled(format!("Send: {}", body), Style::default().fg(Color::Cyan))));
+                }
+                lines.push(Line::from(format!("Via:  {}", via)));
+            } else if is_deliver {
+                let body = if ev.response.is_empty() { ev.response_detail.clone() } else { ev.response.clone() };
+                if !body.is_empty() {
+                    lines.push(Line::from(Span::styled(format!("Received: {}", body), Style::default().fg(Color::Green))));
+                }
+                lines.push(Line::from(format!("Via:      {}", ev.full_command)));
+            } else {
+                // Normal request-response (e.g. Basic.Get, Queue.Declare)
+                lines.push(Line::from(Span::styled(ev.full_command.clone(), Style::default().fg(Color::Cyan))));
+                if !ev.response_detail.is_empty() {
+                    lines.push(Line::from(""));
+                    for rd in ev.response_detail.lines() {
+                        lines.push(Line::from(rd.to_string()));
+                    }
+                }
+            }
+        } else {
+            // MySQL / Postgres / Redis: request, response
+            let formatted_cmd = if ev.protocol == ocular_protocol::Protocol::Mysql {
+                format_sql(&ev.full_command)
+            } else {
+                ev.full_command.clone()
+            };
+            for sql_line in formatted_cmd.lines() {
+                lines.push(highlight_sql_line(sql_line));
+            }
+            // Response detail
+            if !ev.response_detail.is_empty() {
+                lines.push(Line::from(""));
+                for rd in ev.response_detail.lines() {
+                    lines.push(Line::from(rd.to_string()));
+                }
+            }
         }
-        lines.push(Line::from(""));
-        // Header lines (plain)
-        for h in header.lines() {
-            lines.push(Line::from(h.to_string()));
+
+        // Build metadata line
+        let mut meta_parts: Vec<Span> = Vec::new();
+        meta_parts.push(Span::raw(format!("{}  ", format_time(&ev.timestamp))));
+        if let Some(p) = &ev.process {
+            meta_parts.push(Span::styled(format!("{}  ", p), Style::default().fg(Color::DarkGray)));
         }
-        lines.push(Line::from(""));
-        // Response detail
-        for rd in ev.response_detail.lines() {
-            lines.push(Line::from(rd.to_string()));
+        if ev.latency.as_nanos() > 0 {
+            meta_parts.push(Span::styled(format_latency(&ev.latency), Style::default().fg(Color::Yellow)));
         }
-        Text::from(lines)
+        let meta_line = Line::from(meta_parts);
+
+        (Text::from(lines), meta_line)
     } else {
-        Text::from("No events yet. Waiting for traffic...")
+        (Text::from("No events yet. Waiting for traffic..."), Line::from(""))
     };
     let detail_str_for_scroll: String = detail_text.lines.iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
@@ -802,12 +833,23 @@ fn ui(f: &mut Frame, app: &mut App) {
         .sum();
     let max_scroll = wrapped_lines.saturating_sub(1);
     app.detail_scroll = app.detail_scroll.min(max_scroll);
+
+    // Split detail area: main content + 1-line sticky footer
+    let detail_chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(right[1]);
+
     let detail_widget = Paragraph::new(detail_text)
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0))
         .block(Block::default().borders(Borders::TOP).border_style(detail_border).title(title)
             .padding(ratatui::widgets::Padding::left(1)));
-    f.render_widget(detail_widget, right[1]);
+    f.render_widget(detail_widget, detail_chunks[0]);
+
+    let meta_widget = Paragraph::new(detail_meta)
+        .block(Block::default().padding(ratatui::widgets::Padding::horizontal(2)));
+    f.render_widget(meta_widget, detail_chunks[1]);
 
     // Bottom status bar
     let key_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
