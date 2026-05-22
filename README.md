@@ -39,7 +39,8 @@ Your App ──→ Ocular Proxy (16379) ──→ Redis (6379)
 |----------|--------|
 | Redis (RESP) | ✅ |
 | MySQL | ✅ |
-| RabbitMQ (AMQP) | Planned |
+| PostgreSQL | ✅ |
+| RabbitMQ (AMQP) | ✅ |
 | Elasticsearch (HTTP) | Planned |
 
 ## Quick Start
@@ -76,6 +77,12 @@ name = "mysql"
 protocol = "mysql"
 listen = "127.0.0.1:13306"
 remote = "127.0.0.1:3306"
+
+[[proxy]]
+name = "postgres"
+protocol = "postgres"
+listen = "127.0.0.1:15432"
+remote = "127.0.0.1:5432"
 ```
 
 Multiple instances of the same protocol are supported — just use different names and ports:

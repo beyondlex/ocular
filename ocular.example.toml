@@ -31,6 +31,9 @@ case_sensitive = true
 [exclude.mysql]
 patterns = ["SELECT 1"]
 
+[exclude.postgres]
+patterns = ["SET ", "DEALLOCATE"]
+
 # ─── Proxies ────────────────────────────────────────────────────────────────
 
 [[proxy]]
@@ -69,3 +72,9 @@ name = "rabbitmq"
 protocol = "rabbitmq"
 listen = "127.0.0.1:15672"   # Your app connects here
 remote = "127.0.0.1:5672"    # Real RabbitMQ address
+
+[[proxy]]
+name = "postgres"
+protocol = "postgres"
+listen = "127.0.0.1:15432"   # Your app connects here
+remote = "127.0.0.1:5432"    # Real PostgreSQL address
