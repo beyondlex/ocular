@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Local};
 use serde::Deserialize;
 use std::path::PathBuf;
 use tokio::sync::broadcast;
@@ -17,7 +18,21 @@ pub struct Config {
     pub theme_overrides: Option<ocular_tui::ThemeConfig>,
     #[serde(default)]
     pub event_format: Option<String>,
+    #[serde(default)]
+    pub event_log: Option<EventLogConfig>,
 }
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EventLogConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub include_response: bool,
+    #[serde(default)]
+    pub components: Vec<String>,
+}
+
+fn default_true() -> bool { true }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProxyConfig {
@@ -99,6 +114,43 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             if let Err(e) = ocular_proxy::run_proxy(cfg.listen, cfg.remote, cfg.name, protocol, tx).await {
                 tracing::error!(error = %e, "proxy fatal error");
+            }
+        });
+    }
+
+    // Event logger
+    let event_log_enabled = config.event_log.as_ref().map_or(false, |c| c.enabled);
+    let include_response = config.event_log.as_ref().map_or(false, |c| c.include_response);
+    let log_components: Vec<String> = config.event_log.as_ref().map_or(vec![], |c| c.components.clone());
+    if event_log_enabled {
+        let event_log_path = config_dir.join("events.log");
+        let mut event_rx = tx.subscribe();
+        tokio::spawn(async move {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true).append(true).open(&event_log_path)
+                .expect("failed to open events.log");
+            while let Ok(ev) = event_rx.recv().await {
+                if !log_components.is_empty() && !log_components.contains(&ev.component) {
+                    continue;
+                }
+                let ts: DateTime<Local> = ev.timestamp.into();
+                if include_response {
+                    let _ = writeln!(file, "{} [{}] {} ({}) -> {}",
+                        ts.format("%H:%M:%S%.3f"),
+                        ev.component,
+                        ev.full_command,
+                        format!("{:.2}ms", ev.latency.as_secs_f64() * 1000.0),
+                        ev.response,
+                    );
+                } else {
+                    let _ = writeln!(file, "{} [{}] {} ({})",
+                        ts.format("%H:%M:%S%.3f"),
+                        ev.component,
+                        ev.full_command,
+                        format!("{:.2}ms", ev.latency.as_secs_f64() * 1000.0),
+                    );
+                }
             }
         });
     }

@@ -609,7 +609,7 @@ fn reload_config(app: &mut App, cfg: &ReloadableConfig) {
 fn ui(f: &mut Frame, app: &mut App) {
     let outer = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(2)])
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
         .split(f.area());
 
     let chunks = Layout::default()
@@ -652,7 +652,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     })).collect();
     let comp_border = if comp_focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
     let left = List::new(items)
-        .block(Block::default().borders(Borders::TOP).border_style(comp_border).title(" Components "));
+        .block(Block::default().borders(Borders::TOP).border_style(comp_border).title(format!(" Ocular v{} ", env!("CARGO_PKG_VERSION"))));
     f.render_widget(left, chunks[0]);
 
     // Right: vertical split
@@ -830,11 +830,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     };
     f.render_widget(
         Paragraph::new(status_line)
-            .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::DarkGray))
-                .title_bottom(Line::from(Span::styled(
-                    format!(" Ocular v{} ", env!("CARGO_PKG_VERSION")),
-                    Style::default().fg(Color::DarkGray),
-                )).alignment(Alignment::Right))),
+            .block(Block::default().borders(Borders::TOP | Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray))),
         outer[1],
     );
 
