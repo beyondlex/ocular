@@ -9,8 +9,10 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
+use serde::Deserialize;
 use std::io::stdout;
-use std::time::Duration;
+use std::path::PathBuf;
+use std::time::{Duration, SystemTime};
 use tokio::sync::broadcast;
 
 mod theme;
@@ -125,10 +127,44 @@ impl App {
     }
 }
 
+/// Config structure for hot-reload (only the parts we can reload)
+#[derive(Debug, Deserialize)]
+struct ReloadableConfig {
+    #[serde(default)]
+    proxy: Vec<ReloadableProxy>,
+    #[serde(default)]
+    exclude: std::collections::HashMap<String, ReloadableExclude>,
+    #[serde(default)]
+    theme: Option<String>,
+    #[serde(default)]
+    theme_overrides: Option<ThemeConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReloadableProxy {
+    name: String,
+    #[serde(default)]
+    protocol: String,
+    #[serde(default)]
+    exclude: Option<ReloadableExclude>,
+    #[serde(default)]
+    include: Option<ReloadableExclude>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReloadableExclude {
+    patterns: Vec<String>,
+    #[serde(default)]
+    case_sensitive: bool,
+    #[serde(default)]
+    regex: bool,
+}
+
 pub async fn run(
     mut rx: broadcast::Receiver<ProxyEvent>,
     components: Vec<ComponentInfo>,
     theme: Theme,
+    config_path: PathBuf,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -156,7 +192,25 @@ pub async fn run(
         exclude_matchers,
     };
 
+    let mut last_mtime = std::fs::metadata(&config_path).ok()
+        .and_then(|m| m.modified().ok())
+        .unwrap_or(SystemTime::UNIX_EPOCH);
+
     loop {
+        // Hot-reload config on file change
+        if let Ok(meta) = std::fs::metadata(&config_path) {
+            if let Ok(mtime) = meta.modified() {
+                if mtime != last_mtime {
+                    last_mtime = mtime;
+                    if let Ok(content) = std::fs::read_to_string(&config_path) {
+                        if let Ok(cfg) = toml::from_str::<ReloadableConfig>(&content) {
+                            reload_config(&mut app, &cfg);
+                        }
+                    }
+                }
+            }
+        }
+
         while let Ok(ev) = rx.try_recv() {
             if app.paused { continue; }
             if let Some(matcher) = app.exclude_matchers.get(&ev.component) {
@@ -416,6 +470,46 @@ fn format_latency(d: &Duration) -> String {
     } else {
         format!("{:.2}s", d.as_secs_f64())
     }
+}
+
+fn reload_config(app: &mut App, cfg: &ReloadableConfig) {
+    // Rebuild exclude matchers
+    let mut new_matchers = std::collections::HashMap::new();
+    for proxy in &cfg.proxy {
+        let global = cfg.exclude.get(&proxy.protocol);
+        let local = proxy.exclude.as_ref();
+        let include = proxy.include.as_ref();
+
+        let exclude_cfgs: Option<Vec<ExcludeConfig>> = match (global, local) {
+            (Some(g), Some(l)) => Some(vec![
+                ExcludeConfig { patterns: g.patterns.clone(), case_sensitive: g.case_sensitive, regex: g.regex },
+                ExcludeConfig { patterns: l.patterns.clone(), case_sensitive: l.case_sensitive, regex: l.regex },
+            ]),
+            (Some(g), None) => Some(vec![
+                ExcludeConfig { patterns: g.patterns.clone(), case_sensitive: g.case_sensitive, regex: g.regex },
+            ]),
+            (None, Some(l)) => Some(vec![
+                ExcludeConfig { patterns: l.patterns.clone(), case_sensitive: l.case_sensitive, regex: l.regex },
+            ]),
+            (None, None) => None,
+        };
+        let include_cfg = include.map(|i| ExcludeConfig {
+            patterns: i.patterns.clone(), case_sensitive: i.case_sensitive, regex: i.regex,
+        });
+
+        if exclude_cfgs.is_some() || include_cfg.is_some() {
+            new_matchers.insert(proxy.name.clone(), ExcludeMatcher::new(exclude_cfgs.as_ref(), include_cfg.as_ref()));
+        }
+    }
+    app.exclude_matchers = new_matchers;
+
+    // Rebuild theme
+    let base = Theme::by_name(cfg.theme.as_deref().unwrap_or("default"));
+    app.theme = if let Some(ref overrides) = cfg.theme_overrides {
+        Theme::from_config(overrides, &base)
+    } else {
+        base
+    };
 }
 
 fn ui(f: &mut Frame, app: &mut App) {

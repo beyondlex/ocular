@@ -38,7 +38,7 @@ pub struct ExcludeConfig {
     pub regex: bool,
 }
 
-fn load_config() -> Result<(Config, PathBuf)> {
+fn load_config() -> Result<(Config, PathBuf, PathBuf)> {
     let candidates = [
         // 1. Current directory
         Some(PathBuf::from("ocular.toml")),
@@ -53,7 +53,7 @@ fn load_config() -> Result<(Config, PathBuf)> {
             let content = std::fs::read_to_string(candidate)
                 .with_context(|| format!("failed to read {}", candidate.display()))?;
             let config: Config = toml::from_str(&content).context("failed to parse config")?;
-            return Ok((config, config_dir));
+            return Ok((config, config_dir, candidate.clone()));
         }
     }
     anyhow::bail!("config not found. Create ocular.toml in current directory or ~/.config/ocular/ocular.toml")
@@ -74,7 +74,7 @@ fn init_tracing(log_dir: &std::path::Path) {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let (config, config_dir) = load_config()?;
+    let (config, config_dir, config_path) = load_config()?;
     init_tracing(&config_dir);
     info!(proxies = config.proxy.len(), config_dir = %config_dir.display(), "ocular starting");
 
@@ -135,5 +135,5 @@ async fn main() -> Result<()> {
         base_theme
     };
 
-    ocular_tui::run(rx, components, theme).await
+    ocular_tui::run(rx, components, theme, config_path).await
 }

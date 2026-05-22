@@ -571,6 +571,7 @@ dependencies = [
  "serde",
  "sqlformat",
  "tokio",
+ "toml",
 ]
 
 [[package]]
