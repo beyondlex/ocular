@@ -10,6 +10,8 @@ use tracing_subscriber::{fmt, EnvFilter};
 pub struct Config {
     pub proxy: Vec<ProxyConfig>,
     #[serde(default)]
+    pub exclude: std::collections::HashMap<String, ExcludeConfig>,
+    #[serde(default)]
     pub theme: Option<String>,
     #[serde(default)]
     pub theme_overrides: Option<ocular_tui::ThemeConfig>,
@@ -21,6 +23,19 @@ pub struct ProxyConfig {
     pub protocol: String,
     pub listen: String,
     pub remote: String,
+    #[serde(default)]
+    pub exclude: Option<ExcludeConfig>,
+    #[serde(default)]
+    pub include: Option<ExcludeConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExcludeConfig {
+    pub patterns: Vec<String>,
+    #[serde(default)]
+    pub case_sensitive: bool,
+    #[serde(default)]
+    pub regex: bool,
 }
 
 fn load_config() -> Result<(Config, PathBuf)> {
@@ -82,7 +97,26 @@ async fn main() -> Result<()> {
 
     let rx = tx.subscribe();
     let components: Vec<ocular_tui::ComponentInfo> = config.proxy.iter().map(|p| {
-        ocular_tui::ComponentInfo { name: p.name.clone(), listen: p.listen.clone() }
+        // Per-proxy exclude takes priority, fallback to protocol-level exclude
+        let exclude = p.exclude.as_ref()
+            .or_else(|| config.exclude.get(&p.protocol))
+            .or_else(|| config.exclude.get(&p.name))
+            .map(|e| ocular_tui::ExcludeConfig {
+                patterns: e.patterns.clone(),
+                case_sensitive: e.case_sensitive,
+                regex: e.regex,
+            });
+        let include = p.include.as_ref().map(|e| ocular_tui::ExcludeConfig {
+            patterns: e.patterns.clone(),
+            case_sensitive: e.case_sensitive,
+            regex: e.regex,
+        });
+        ocular_tui::ComponentInfo {
+            name: p.name.clone(),
+            listen: p.listen.clone(),
+            exclude,
+            include,
+        }
     }).collect();
 
     let base_theme = ocular_tui::Theme::by_name(config.theme.as_deref().unwrap_or("default"));

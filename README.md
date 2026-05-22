@@ -105,6 +105,72 @@ mysql -h 127.0.0.1 -P 13306 -u root -p
 
 > **Note:** For MySQL, use `-h 127.0.0.1` (not `localhost`) to ensure TCP connection through the proxy.
 
+## Event Filtering (Exclude / Include)
+
+Hide noisy events from the Events panel using `exclude` rules. Use `include` to override excludes and force specific events to remain visible.
+
+### Global exclude (by protocol)
+
+Apply to all proxies of a given protocol:
+
+```toml
+[exclude.redis]
+patterns = ["PING", "INFO"]
+
+[exclude.rabbitmq]
+patterns = ["Heartbeat"]
+case_sensitive = true
+
+[exclude.mysql]
+patterns = ["SELECT 1"]
+```
+
+### Per-proxy exclude
+
+Override the global rule for a specific proxy:
+
+```toml
+[[proxy]]
+name = "mysql-dev"
+protocol = "mysql"
+listen = "127.0.0.1:13306"
+remote = "127.0.0.1:3306"
+[proxy.exclude]
+patterns = ["^SELECT 1$", "^PING$"]
+regex = true
+case_sensitive = false
+```
+
+When a `[[proxy]]` has its own `[proxy.exclude]`, it takes priority over the global `[exclude.<protocol>]`.
+
+### Include (override exclude)
+
+Force events to be shown even if they match an exclude rule:
+
+```toml
+[exclude.redis]
+patterns = ["PING", "INFO", "SUBSCRIBE"]
+
+[[proxy]]
+name = "redis-debug"
+protocol = "redis"
+listen = "127.0.0.1:16380"
+remote = "127.0.0.1:6380"
+# Inherits global exclude, but force-shows PING
+[proxy.include]
+patterns = ["PING"]
+```
+
+Evaluation order: **include match → show** > **exclude match → hide** > **default → show**
+
+### Options
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `patterns` | (required) | List of strings to match against the event command |
+| `case_sensitive` | `false` | Whether matching is case-sensitive |
+| `regex` | `false` | Treat patterns as regular expressions |
+
 ## Keybindings
 
 | Key | Action |

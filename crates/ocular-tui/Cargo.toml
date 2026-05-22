@@ -9,6 +9,7 @@ ratatui.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 serde.workspace = true
+regex.workspace = true
 chrono = "0.4"
 sqlformat = "0.2"
 ocular-proxy = { path = "../ocular-proxy" }

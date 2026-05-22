@@ -20,6 +20,66 @@ pub use theme::{Theme, ThemeConfig};
 pub struct ComponentInfo {
     pub name: String,
     pub listen: String,
+    pub exclude: Option<ExcludeConfig>,
+    pub include: Option<ExcludeConfig>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExcludeConfig {
+    pub patterns: Vec<String>,
+    pub case_sensitive: bool,
+    pub regex: bool,
+}
+
+/// Compiled exclude matcher for a component
+struct ExcludeMatcher {
+    excludes: Vec<MatcherKind>,
+    includes: Vec<MatcherKind>,
+}
+
+enum MatcherKind {
+    Regex(regex::Regex),
+    Plain { pattern: String, case_sensitive: bool },
+}
+
+impl ExcludeMatcher {
+    fn compile_patterns(cfg: &ExcludeConfig) -> Vec<MatcherKind> {
+        cfg.patterns.iter().filter_map(|p| {
+            if cfg.regex {
+                let pat = if cfg.case_sensitive { p.clone() } else { format!("(?i){}", p) };
+                regex::Regex::new(&pat).ok().map(MatcherKind::Regex)
+            } else {
+                let pattern = if cfg.case_sensitive { p.clone() } else { p.to_lowercase() };
+                Some(MatcherKind::Plain { pattern, case_sensitive: cfg.case_sensitive })
+            }
+        }).collect()
+    }
+
+    fn new(exclude: Option<&ExcludeConfig>, include: Option<&ExcludeConfig>) -> Self {
+        Self {
+            excludes: exclude.map(|c| Self::compile_patterns(c)).unwrap_or_default(),
+            includes: include.map(|c| Self::compile_patterns(c)).unwrap_or_default(),
+        }
+    }
+
+    fn matches_any(matchers: &[MatcherKind], text: &str) -> bool {
+        matchers.iter().any(|m| match m {
+            MatcherKind::Regex(re) => re.is_match(text),
+            MatcherKind::Plain { pattern, case_sensitive } => {
+                if *case_sensitive { text.contains(pattern.as_str()) }
+                else { text.to_lowercase().contains(pattern.as_str()) }
+            }
+        })
+    }
+
+    fn is_excluded(&self, text: &str) -> bool {
+        if self.excludes.is_empty() { return false; }
+        // include overrides exclude
+        if !self.includes.is_empty() && Self::matches_any(&self.includes, text) {
+            return false;
+        }
+        Self::matches_any(&self.excludes, text)
+    }
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -39,11 +99,16 @@ struct App {
     visual_anchor: usize, // start of visual selection
     theme: Theme,
     paused: bool,
+    exclude_matchers: std::collections::HashMap<String, ExcludeMatcher>,
 }
 
 impl App {
     fn filtered_events(&self) -> Vec<(usize, &ProxyEvent)> {
         self.events.iter().enumerate().filter(|(_, ev)| {
+            // Exclude rules
+            if let Some(matcher) = self.exclude_matchers.get(&ev.component) {
+                if matcher.is_excluded(&ev.command) { return false; }
+            }
             if let Some(idx) = self.component_idx {
                 if let Some(c) = self.components.get(idx) {
                     if ev.component != c.name { return false; }
@@ -70,6 +135,11 @@ pub async fn run(
     stdout().execute(EnterAlternateScreen)?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
+    let exclude_matchers: std::collections::HashMap<String, ExcludeMatcher> = components.iter()
+        .filter(|c| c.exclude.is_some() || c.include.is_some())
+        .map(|c| (c.name.clone(), ExcludeMatcher::new(c.exclude.as_ref(), c.include.as_ref())))
+        .collect();
+
     let mut app = App {
         events: Vec::new(),
         selected: 0,
@@ -84,6 +154,7 @@ pub async fn run(
         visual_anchor: 0,
         theme,
         paused: false,
+        exclude_matchers,
     };
 
     loop {
