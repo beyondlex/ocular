@@ -544,13 +544,15 @@ fn format_sql(sql: &str) -> String {
 }
 
 fn format_latency(d: &Duration) -> String {
-    let us = d.as_micros();
-    if us < 1000 {
-        format!("{}μs", us)
-    } else if us < 1_000_000 {
-        format!("{:.1}ms", us as f64 / 1000.0)
+    let ms = d.as_secs_f64() * 1000.0;
+    if ms >= 1000.0 {
+        format!("{}ms", ms as u64)
+    } else if ms >= 100.0 {
+        format!("{:.1}ms", ms)
+    } else if ms >= 10.0 {
+        format!("{:.2}ms", ms)
     } else {
-        format!("{:.2}s", d.as_secs_f64())
+        format!("{:.3}ms", ms)
     }
 }
 

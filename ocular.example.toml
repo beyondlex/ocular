@@ -4,6 +4,8 @@
 theme = "tokyo-night-storm"
 # theme = "dracula"
 
+event_format = "%{5}index %time %{-8}component %latency %command "
+
 # Optional: override individual theme elements
 # [theme_overrides]
 # timestamp = { fg = "#888888" }
