@@ -1,8 +1,10 @@
 # Ocular
 
-A TUI tool for real-time visualization of middleware traffic. See exactly what your services send to Redis, MySQL, RabbitMQ, Elasticsearch — regardless of programming language.
+A TUI tool for real-time visualization of middleware traffic. See exactly what your services send to Redis, MySQL, PostgreSQL, RabbitMQ, Elasticsearch — regardless of programming language.
 
 ![Rust](https://img.shields.io/badge/rust-stable-orange) ![License](https://img.shields.io/badge/license-MIT-blue)
+
+![Ocular TUI](ocular.png)
 
 ## How It Works
 
@@ -244,7 +246,7 @@ Press `Space` to open a floating command palette:
 |-----|--------|
 | `h` | Jump Left |
 | `j` | Jump Down |
-| `k` | Jump Above |
+| `k` | Jump Up |
 | `l` | Jump Right |
 | `c` | Clear all events |
 
