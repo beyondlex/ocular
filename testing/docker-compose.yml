@@ -48,3 +48,24 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     profiles: ["client"]
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  rabbitmq-client:
+    image: python:3-alpine
+    depends_on:
+      - rabbitmq
+    volumes:
+      - ./rabbitmq_crud.sh:/crud.sh:ro
+    entrypoint: ["sh", "/crud.sh"]
+    environment:
+      - RABBITMQ_HOST=host.docker.internal
+      - RABBITMQ_PORT=15672
+      - INTERVAL=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles: ["client"]
