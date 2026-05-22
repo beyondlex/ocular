@@ -88,7 +88,7 @@ pub fn parse_amqp_frame(buf: &[u8]) -> Option<AmqpFrame> {
 }
 
 /// Returns the byte length of the first frame in buf, or None if incomplete.
-fn frame_len(buf: &[u8]) -> Option<usize> {
+pub fn frame_len(buf: &[u8]) -> Option<usize> {
     if buf.len() >= 8 && &buf[0..4] == b"AMQP" {
         return Some(8);
     }

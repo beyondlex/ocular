@@ -4,7 +4,7 @@ pub mod amqp;
 
 pub use resp::{RespValue, parse_resp};
 pub use mysql::{parse_mysql_request, parse_mysql_response};
-pub use amqp::{parse_amqp_request, parse_amqp_response, format_amqp_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method};
+pub use amqp::{parse_amqp_request, parse_amqp_response, format_amqp_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, frame_len as amqp_frame_len};
 
 use std::time::{Duration, SystemTime};
 

@@ -51,8 +51,14 @@ while True:
             ch.queue_purge(queue=q)
     except Exception as e:
         print(f'Error: {e}')
-        conn = pika.BlockingConnection(pika.ConnectionParameters(host=host, port=port))
-        ch = conn.channel()
+        while True:
+            try:
+                time.sleep(2)
+                conn = pika.BlockingConnection(pika.ConnectionParameters(host=host, port=port))
+                ch = conn.channel()
+                break
+            except Exception:
+                pass
     i += 1
     time.sleep(interval)
 "
