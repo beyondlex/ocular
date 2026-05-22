@@ -341,7 +341,8 @@ fn parse_basic_deliver(args: &[u8]) -> (String, String) {
     let (exchange, c2) = read_short_str(rest).unwrap_or_default();
     let rest = &rest[c2..];
     let (routing_key, _) = read_short_str(rest).unwrap_or_default();
-    let summary = format!("Basic.Deliver key={}", routing_key);
+    let ex = if exchange.is_empty() { "(default)" } else { &exchange };
+    let summary = format!("Basic.Deliver ← {} key={}", ex, routing_key);
     let detail = format!("Basic.Deliver consumer={} delivery_tag={} exchange={} routing_key={}", consumer_tag, delivery_tag, exchange, routing_key);
     (summary, detail)
 }

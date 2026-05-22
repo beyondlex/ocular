@@ -135,19 +135,21 @@ async fn main() -> Result<()> {
                     continue;
                 }
                 let ts: DateTime<Local> = ev.timestamp.into();
+                let command = ev.full_command.replace('\n', " ");
                 if include_response {
+                    let response = ev.response.replace('\n', " ");
                     let _ = writeln!(file, "{} [{}] {} ({}) -> {}",
                         ts.format("%H:%M:%S%.3f"),
                         ev.component,
-                        ev.full_command,
+                        command,
                         format!("{:.2}ms", ev.latency.as_secs_f64() * 1000.0),
-                        ev.response,
+                        response,
                     );
                 } else {
                     let _ = writeln!(file, "{} [{}] {} ({})",
                         ts.format("%H:%M:%S%.3f"),
                         ev.component,
-                        ev.full_command,
+                        command,
                         format!("{:.2}ms", ev.latency.as_secs_f64() * 1000.0),
                     );
                 }

@@ -137,6 +137,11 @@ async fn handle_conn(
                     let frame_data = &data[pos..];
                     let Some(flen) = amqp_frame_len(frame_data) else { break };
                     if let Some(frame) = parse_amqp_frame(frame_data) {
+                        // Skip heartbeat — not a real request
+                        if frame.frame_type == 8 {
+                            pos += flen;
+                            continue;
+                        }
                         if let Some(ref method) = frame.method {
                             if is_async_method(method.class_id, method.method_id) {
                                 let (summary, detail) = parse_amqp_request_full(frame_data)
@@ -226,10 +231,50 @@ async fn handle_conn(
                 while pos < data.len() {
                     let frame_data = &data[pos..];
                     let Some(flen) = amqp_frame_len(frame_data) else { break };
+                    if let Some(frame) = parse_amqp_frame(frame_data) {
+                        // Skip content header and body frames — handled below with method
+                        if frame.frame_type == 2 || frame.frame_type == 3 {
+                            pos += flen;
+                            continue;
+                        }
+                        // Heartbeat: skip
+                        if frame.frame_type == 8 {
+                            pos += flen;
+                            continue;
+                        }
+                    }
+
+                    // Extract body from subsequent Header+Body frames
+                    let mut body_text = String::new();
+                    let mut peek = pos + flen;
+                    while peek < data.len() {
+                        let peek_data = &data[peek..];
+                        let Some(plen) = amqp_frame_len(peek_data) else { break };
+                        if let Some(pf) = parse_amqp_frame(peek_data) {
+                            if pf.frame_type == 2 {
+                                // Header frame, skip
+                            } else if pf.frame_type == 3 {
+                                // Body frame
+                                if let Some(body) = &pf.body {
+                                    body_text = String::from_utf8_lossy(body).to_string();
+                                }
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                        peek += plen;
+                    }
+
                     if let Some(req) = pending_r.lock().await.take() {
                         let latency = req.instant.elapsed();
-                        let response = parse_response(protocol, frame_data).unwrap_or_default();
-                        let response_detail = format_response_detail(protocol, frame_data).unwrap_or_else(|| response.clone());
+                        let mut response = parse_response(protocol, frame_data).unwrap_or_default();
+                        let mut response_detail = format_response_detail(protocol, frame_data).unwrap_or_else(|| response.clone());
+                        if !body_text.is_empty() {
+                            response = format!("{} | {}", response, body_text);
+                            response_detail = format!("{}\nBody: {}", response_detail, body_text);
+                        }
                         let _ = tx_resp.send(ProxyEvent {
                             timestamp: req.timestamp,
                             component: name_resp.clone(),
@@ -241,21 +286,27 @@ async fn handle_conn(
                             latency,
                             process: process_info.clone(),
                         });
-                    } else if let Some(response) = parse_response(protocol, frame_data) {
-                        let response_detail = format_response_detail(protocol, frame_data).unwrap_or_else(|| response.clone());
-                        let _ = tx_resp.send(ProxyEvent {
-                            timestamp: SystemTime::now(),
-                            component: name_resp.clone(),
-                            protocol,
-                            command: response.clone(),
-                            full_command: response_detail.clone(),
-                            response: String::new(),
-                            response_detail,
-                            latency: std::time::Duration::ZERO,
-                            process: process_info.clone(),
-                        });
+                    } else if let Some(frame) = parse_amqp_frame(frame_data) {
+                        // Server-initiated method (e.g. Basic.Deliver) — emit as standalone
+                        if let Some(ref method) = frame.method {
+                            let response = if body_text.is_empty() { String::new() } else { body_text.clone() };
+                            let response_detail = if body_text.is_empty() { String::new() } else { body_text.clone() };
+                            let command = method.summary.clone();
+                            let _ = tx_resp.send(ProxyEvent {
+                                timestamp: SystemTime::now(),
+                                component: name_resp.clone(),
+                                protocol,
+                                command,
+                                full_command: method.detail.clone(),
+                                response,
+                                response_detail,
+                                latency: std::time::Duration::ZERO,
+                                process: process_info.clone(),
+                            });
+                        }
                     }
-                    pos += flen;
+                    // Advance past the method frame + any header/body frames we consumed
+                    pos = peek;
                 }
             } else if protocol == Protocol::Postgres {
                 // Postgres: only pair with meaningful responses, skip setup noise

@@ -31,6 +31,14 @@ for q in queues:
 ch.queue_bind(queue='tasks', exchange='topic_ex', routing_key='task.*')
 ch.queue_bind(queue='events', exchange='fanout_ex')
 
+# Consumer callback
+def on_message(ch, method, properties, body):
+    print(f'Consumed: {body.decode()} from {method.routing_key}')
+    ch.basic_ack(delivery_tag=method.delivery_tag)
+
+# Subscribe to 'events' queue
+ch.basic_consume(queue='events', on_message_callback=on_message)
+
 print('Starting AMQP operations...')
 i = 0
 while True:
@@ -56,9 +64,14 @@ while True:
                 time.sleep(2)
                 conn = pika.BlockingConnection(pika.ConnectionParameters(host=host, port=port))
                 ch = conn.channel()
+                ch.basic_consume(queue='events', on_message_callback=on_message)
                 break
             except Exception:
                 pass
     i += 1
     time.sleep(interval)
+    try:
+        conn.process_data_events(time_limit=0)
+    except Exception:
+        pass
 "
