@@ -1,6 +1,7 @@
 pub mod resp;
 pub mod mysql;
 pub mod amqp;
+pub mod postgres;
 
 pub use resp::{RespValue, parse_resp};
 pub use mysql::{parse_mysql_request, parse_mysql_response};
@@ -39,6 +40,7 @@ pub enum Protocol {
     Redis,
     Mysql,
     Amqp,
+    Postgres,
 }
 
 impl Protocol {
@@ -47,6 +49,7 @@ impl Protocol {
             "redis" => Some(Protocol::Redis),
             "mysql" => Some(Protocol::Mysql),
             "amqp" | "rabbitmq" => Some(Protocol::Amqp),
+            "postgres" | "postgresql" => Some(Protocol::Postgres),
             _ => None,
         }
     }
@@ -63,6 +66,9 @@ pub fn parse_request(protocol: Protocol, buf: &[u8]) -> Option<String> {
         }
         Protocol::Amqp => {
             parse_amqp_request(buf)
+        }
+        Protocol::Postgres => {
+            postgres::parse_postgres_request(buf)
         }
     }
 }
@@ -88,6 +94,9 @@ pub fn extract_full_command(protocol: Protocol, buf: &[u8]) -> Option<String> {
         Protocol::Amqp => {
             parse_amqp_request(buf)
         }
+        Protocol::Postgres => {
+            postgres::extract_postgres_full_command(buf)
+        }
     }
 }
 
@@ -103,6 +112,9 @@ pub fn parse_response(protocol: Protocol, buf: &[u8]) -> Option<String> {
         Protocol::Amqp => {
             parse_amqp_response(buf)
         }
+        Protocol::Postgres => {
+            postgres::parse_postgres_response(buf)
+        }
     }
 }
 
@@ -117,6 +129,9 @@ pub fn format_response_detail(protocol: Protocol, buf: &[u8]) -> Option<String> 
         }
         Protocol::Amqp => {
             format_amqp_response_detail(buf)
+        }
+        Protocol::Postgres => {
+            postgres::format_postgres_response_detail(buf)
         }
     }
 }

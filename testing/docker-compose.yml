@@ -69,3 +69,31 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     profiles: ["client"]
+
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: testdb
+      POSTGRES_HOST_AUTH_METHOD: trust
+
+  postgres-client:
+    image: postgres:16-alpine
+    depends_on:
+      - postgres
+    volumes:
+      - ./postgres_crud.sh:/crud.sh:ro
+    entrypoint: ["sh", "/crud.sh"]
+    environment:
+      - PGHOST=host.docker.internal
+      - PGPORT=15432
+      - PGUSER=postgres
+      - PGPASSWORD=postgres
+      - PGDATABASE=testdb
+      - INTERVAL=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles: ["client"]

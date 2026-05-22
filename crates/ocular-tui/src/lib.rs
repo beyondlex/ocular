@@ -459,7 +459,7 @@ pub async fn run(
                         app.pending_keys.clear();
                         let filtered = app.filtered_events();
                         if let Some((_, ev)) = filtered.get(app.selected) {
-                            let detail_content = if ev.protocol == ocular_protocol::Protocol::Mysql {
+                            let detail_content = if ev.protocol == ocular_protocol::Protocol::Mysql || ev.protocol == ocular_protocol::Protocol::Postgres {
                                 format!("{}\n\n-- Response: {}\n-- Latency: {}\n\n{}",
                                     ev.full_command, ev.response,
                                     format_latency(&ev.latency), ev.response_detail)

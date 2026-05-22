@@ -77,6 +77,38 @@ async fn handle_conn(
         debug!(component = %name, "forwarded MySQL greeting with SSL stripped");
     }
 
+    // For PostgreSQL: handle SSL negotiation before normal flow
+    if protocol == Protocol::Postgres {
+        let mut buf = [0u8; 256];
+        let n = client.read(&mut buf).await?;
+        if n == 0 { return Ok(()); }
+        let data = &buf[..n];
+        // Forward SSLRequest to server
+        server.write_all(data).await?;
+        // Read server's SSL response (single byte N or S)
+        let mut resp = [0u8; 1];
+        let rn = server.read(&mut resp).await?;
+        if rn == 0 { return Ok(()); }
+        // Forward to client
+        client.write_all(&resp[..rn]).await?;
+        // Emit SSLRequest event
+        let command = parse_request(protocol, data).unwrap_or_else(|| "SSLRequest".into());
+        let response = if resp[0] == b'N' { "SSLResponse: No" } else { "SSLResponse: Yes" };
+        let _ = tx.send(ProxyEvent {
+            timestamp: SystemTime::now(),
+            component: name.to_string(),
+            protocol,
+            command: command.clone(),
+            full_command: command,
+            response: response.into(),
+            response_detail: response.into(),
+            latency: std::time::Duration::ZERO,
+            process: process.clone(),
+        });
+        // If server said 'S' (SSL), we'd need to upgrade — but we don't support that
+        // Most local setups respond 'N'
+    }
+
     let (mut cr, mut cw) = client.split();
     let (mut sr, mut sw) = server.split();
 
@@ -142,6 +174,8 @@ async fn handle_conn(
                     command,
                     full_command,
                 });
+            } else if protocol == Protocol::Postgres && n > 0 {
+                info!(component = %name_req, bytes = n, first_byte = format!("0x{:02x}", data[0]), "pg client→server UNPARSED");
             }
 
             sw.write_all(data).await?;
@@ -223,6 +257,32 @@ async fn handle_conn(
                     }
                     pos += flen;
                 }
+            } else if protocol == Protocol::Postgres {
+                // Postgres: only pair with meaningful responses, skip setup noise
+                let first = data[0];
+                info!(component = %name_resp, bytes = n, first_byte = format!("0x{:02x}", first),
+                    hex_head = format!("{:02x?}", &data[..n.min(20)]), "pg server→client");
+                // Use parse_postgres_response which scans all messages and prioritizes errors
+                let is_meaningful = matches!(first, b'C' | b'E' | b'T' | b'Z' | b'I' | b'D' | b'R');
+                if is_meaningful {
+                    if let Some(req) = pending_r.lock().await.take() {
+                        let latency = req.instant.elapsed();
+                        let response = parse_response(protocol, data).unwrap_or_default();
+                        let response_detail = format_response_detail(protocol, data).unwrap_or_else(|| response.clone());
+                        let _ = tx_resp.send(ProxyEvent {
+                            timestamp: req.timestamp,
+                            component: name_resp.clone(),
+                            protocol,
+                            command: req.command,
+                            full_command: req.full_command,
+                            response,
+                            response_detail,
+                            latency,
+                            process: process_info.clone(),
+                        });
+                    }
+                }
+                // ParameterStatus (S), BackendKeyData (K), etc. are silently skipped
             } else {
                 // Redis: single request/response per read
                 if let Some(req) = pending_r.lock().await.take() {
