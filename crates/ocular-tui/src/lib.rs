@@ -20,7 +20,7 @@ pub use theme::{Theme, ThemeConfig};
 pub struct ComponentInfo {
     pub name: String,
     pub listen: String,
-    pub exclude: Option<ExcludeConfig>,
+    pub exclude: Option<Vec<ExcludeConfig>>,
     pub include: Option<ExcludeConfig>,
 }
 
@@ -55,9 +55,12 @@ impl ExcludeMatcher {
         }).collect()
     }
 
-    fn new(exclude: Option<&ExcludeConfig>, include: Option<&ExcludeConfig>) -> Self {
+    fn new(excludes: Option<&Vec<ExcludeConfig>>, include: Option<&ExcludeConfig>) -> Self {
+        let exclude_matchers = excludes.map(|cfgs| {
+            cfgs.iter().flat_map(|c| Self::compile_patterns(c)).collect()
+        }).unwrap_or_default();
         Self {
-            excludes: exclude.map(|c| Self::compile_patterns(c)).unwrap_or_default(),
+            excludes: exclude_matchers,
             includes: include.map(|c| Self::compile_patterns(c)).unwrap_or_default(),
         }
     }
@@ -105,10 +108,6 @@ struct App {
 impl App {
     fn filtered_events(&self) -> Vec<(usize, &ProxyEvent)> {
         self.events.iter().enumerate().filter(|(_, ev)| {
-            // Exclude rules
-            if let Some(matcher) = self.exclude_matchers.get(&ev.component) {
-                if matcher.is_excluded(&ev.command) { return false; }
-            }
             if let Some(idx) = self.component_idx {
                 if let Some(c) = self.components.get(idx) {
                     if ev.component != c.name { return false; }
@@ -160,6 +159,9 @@ pub async fn run(
     loop {
         while let Ok(ev) = rx.try_recv() {
             if app.paused { continue; }
+            if let Some(matcher) = app.exclude_matchers.get(&ev.component) {
+                if matcher.is_excluded(&ev.command) { continue; }
+            }
             app.events.push(ev);
             if app.focus == Focus::Events && app.filter.is_empty() {
                 let filtered = app.filtered_events();

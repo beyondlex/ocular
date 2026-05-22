@@ -97,15 +97,24 @@ async fn main() -> Result<()> {
 
     let rx = tx.subscribe();
     let components: Vec<ocular_tui::ComponentInfo> = config.proxy.iter().map(|p| {
-        // Per-proxy exclude takes priority, fallback to protocol-level exclude
-        let exclude = p.exclude.as_ref()
-            .or_else(|| config.exclude.get(&p.protocol))
-            .or_else(|| config.exclude.get(&p.name))
-            .map(|e| ocular_tui::ExcludeConfig {
-                patterns: e.patterns.clone(),
-                case_sensitive: e.case_sensitive,
-                regex: e.regex,
-            });
+        // Global exclude for this protocol
+        let global_exclude = config.exclude.get(&p.protocol).map(|e| ocular_tui::ExcludeConfig {
+            patterns: e.patterns.clone(),
+            case_sensitive: e.case_sensitive,
+            regex: e.regex,
+        });
+        // Per-proxy exclude (merged with global)
+        let local_exclude = p.exclude.as_ref().map(|e| ocular_tui::ExcludeConfig {
+            patterns: e.patterns.clone(),
+            case_sensitive: e.case_sensitive,
+            regex: e.regex,
+        });
+        let exclude = match (global_exclude, local_exclude) {
+            (Some(g), Some(l)) => Some(vec![g, l]),
+            (Some(g), None) => Some(vec![g]),
+            (None, Some(l)) => Some(vec![l]),
+            (None, None) => None,
+        };
         let include = p.include.as_ref().map(|e| ocular_tui::ExcludeConfig {
             patterns: e.patterns.clone(),
             case_sensitive: e.case_sensitive,

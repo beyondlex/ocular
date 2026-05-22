@@ -141,7 +141,7 @@ regex = true
 case_sensitive = false
 ```
 
-When a `[[proxy]]` has its own `[proxy.exclude]`, it takes priority over the global `[exclude.<protocol>]`.
+When a `[[proxy]]` has its own `[proxy.exclude]`, it is **merged** with the global `[exclude.<protocol>]` — both sets of patterns apply. Use `[proxy.include]` to selectively override specific patterns.
 
 ### Include (override exclude)
 

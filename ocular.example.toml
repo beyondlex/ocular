@@ -7,16 +7,44 @@ theme = "tokyo-night-storm"
 # Optional: override individual theme elements
 # [theme_overrides]
 # timestamp = { fg = "#888888" }
-# component_redis = { fg = "#ff8c00", bold = true }
+# component_redis = { fg = "#ff5050", bold = true }
 # component_mysql = { fg = "#5080ff", bold = true }
+# component_rabbitmq = { fg = "#ff8c00", bold = true }
 # command = { fg = "#ffffff" }
 # selected = { fg = "#ffffff", bg = "#333355" }
+
+# ─── Global Exclude (by protocol) ───────────────────────────────────────────
+# Applied to all proxies of the given protocol.
+# Per-proxy [proxy.exclude] is merged with (not replaces) the global rules.
+
+[exclude.redis]
+patterns = ["PING", "INFO"]
+# case_sensitive = false   # default
+# regex = false            # default
+
+[exclude.rabbitmq]
+patterns = ["Heartbeat"]
+case_sensitive = true
+
+[exclude.mysql]
+patterns = ["SELECT 1"]
+
+# ─── Proxies ────────────────────────────────────────────────────────────────
 
 [[proxy]]
 name = "redis"
 protocol = "redis"
 listen = "127.0.0.1:16379"   # Your app connects here
 remote = "127.0.0.1:6379"    # Real Redis address
+
+[[proxy]]
+name = "redis-debug"
+protocol = "redis"
+listen = "127.0.0.1:16380"
+remote = "127.0.0.1:6380"
+# Include overrides exclude — force-show PING even though global excludes it
+[proxy.include]
+patterns = ["PING"]
 
 [[proxy]]
 name = "mysql-local"
@@ -27,5 +55,15 @@ remote = "127.0.0.1:3306"    # Real MySQL address
 [[proxy]]
 name = "mysql-dev"
 protocol = "mysql"
-listen = "127.0.0.1:13306"   # Your app connects here
-remote = "dev_host:3306"    # Real MySQL address
+listen = "127.0.0.1:13307"
+remote = "dev_host:3306"
+# Per-proxy exclude (merged with global [exclude.mysql])
+[proxy.exclude]
+patterns = ["^SET NAMES", "^SET character_set"]
+regex = true
+
+[[proxy]]
+name = "rabbitmq"
+protocol = "rabbitmq"
+listen = "127.0.0.1:15672"   # Your app connects here
+remote = "127.0.0.1:5672"    # Real RabbitMQ address
