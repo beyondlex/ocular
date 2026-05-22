@@ -235,10 +235,10 @@ Press `Space` to open a floating command palette:
 
 | Key | Action |
 |-----|--------|
-| `h` | Jump to Components panel |
-| `j` | Jump to Detail panel |
-| `k` | Jump to Events panel |
-| `l` | Jump to Events panel |
+| `h` | Jump Left |
+| `j` | Jump Down |
+| `k` | Jump Above |
+| `l` | Jump Right |
 | `c` | Clear all events |
 
 ## Architecture

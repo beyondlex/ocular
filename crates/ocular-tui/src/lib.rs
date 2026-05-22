@@ -604,7 +604,7 @@ fn reload_config(app: &mut App, cfg: &ReloadableConfig) {
 fn ui(f: &mut Frame, app: &mut App) {
     let outer = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .constraints([Constraint::Min(0), Constraint::Length(2)])
         .split(f.area());
 
     let chunks = Layout::default()
@@ -643,9 +643,9 @@ fn ui(f: &mut Frame, app: &mut App) {
             Span::styled(format!(" ({})", c.listen), addr_style),
         ])).style(style)
     })).collect();
-    let comp_border = if comp_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
+    let comp_border = if comp_focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
     let left = List::new(items)
-        .block(Block::default().borders(Borders::TOP | Borders::LEFT | Borders::BOTTOM).border_style(comp_border).title(" Components "));
+        .block(Block::default().borders(Borders::TOP).border_style(comp_border).title(" Components "));
     f.render_widget(left, chunks[0]);
 
     // Right: vertical split
@@ -714,16 +714,24 @@ fn ui(f: &mut Frame, app: &mut App) {
     } else {
         String::new()
     };
-    let events_border = if events_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
+    let events_border = if events_focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
     let visual_info = if app.visual_mode { " [VISUAL]" } else { "" };
     let paused_info = if app.paused { " ⏸ PAUSED" } else { "" };
-    let mut title_spans = vec![Span::raw(format!(" Events{}", visual_info))];
+    let ek = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let mut title_spans = vec![
+        Span::raw(" Events ("),
+        Span::styled("y", ek), Span::raw(": copy, "),
+        Span::styled("Enter", ek), Span::raw(": detail, "),
+        Span::styled("e", ek), Span::raw(": edit, "),
+        Span::styled("v", ek), Span::raw(": visual)"),
+    ];
     if app.paused {
         title_spans.push(Span::styled(paused_info, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)));
     }
+    title_spans.push(Span::raw(visual_info));
     title_spans.push(Span::raw(format!("{}{} ", filter_info, count_info)));
     let event_list = List::new(event_items)
-        .block(Block::default().borders(Borders::TOP | Borders::LEFT | Borders::RIGHT).border_style(events_border)
+        .block(Block::default().borders(Borders::TOP).border_style(events_border)
             .title(Line::from(title_spans)));
     f.render_widget(event_list, right[0]);
 
@@ -768,8 +776,18 @@ fn ui(f: &mut Frame, app: &mut App) {
     let detail_str_for_scroll: String = detail_text.lines.iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
         .collect::<Vec<_>>().join("\n");
-    let detail_border = if detail_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
-    let title = if detail_focused { " Detail (j/k: scroll, e: edit, esc: back to Events) " } else { " Detail " };
+    let detail_border = if detail_focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
+    let key_hint = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let title = if detail_focused {
+        Line::from(vec![
+            Span::raw(" Detail ("),
+            Span::styled("j/k", key_hint), Span::raw(": scroll, "),
+            Span::styled("e", key_hint), Span::raw(": edit, "),
+            Span::styled("esc", key_hint), Span::raw(": back to Events) "),
+        ])
+    } else {
+        Line::from(" Detail ")
+    };
     // Clamp scroll
     let detail_view_width = right[1].width.saturating_sub(2).max(1) as usize;
     let wrapped_lines: u16 = detail_str_for_scroll.lines()
@@ -780,28 +798,47 @@ fn ui(f: &mut Frame, app: &mut App) {
     let detail_widget = Paragraph::new(detail_text)
         .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0))
-        .block(Block::default().borders(Borders::ALL).border_style(detail_border).title(title));
+        .block(Block::default().borders(Borders::TOP).border_style(detail_border).title(title)
+            .padding(ratatui::widgets::Padding::left(1)));
     f.render_widget(detail_widget, right[1]);
 
     // Bottom status bar
-    let status = if app.focus == Focus::Filter {
-        Span::styled(format!("/{}", app.filter), Style::default().fg(Color::Yellow))
+    let key_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+    let sep = Style::default().fg(Color::DarkGray);
+    let status_line = if app.focus == Focus::Filter {
+        Line::from(Span::styled(format!("/{}", app.filter), Style::default().fg(Color::Yellow)))
     } else {
-        Span::raw(" Tab cycle │ / filter │ j/k navigate │ y copy │ Space menu │ q quit")
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("Tab", key_style), Span::raw(" cycle "),
+            Span::styled("│", sep), Span::raw(" "),
+            Span::styled("/", key_style), Span::raw(" filter "),
+            Span::styled("│", sep), Span::raw(" "),
+            Span::styled("j/k", key_style), Span::raw(" navigate "),
+            Span::styled("│", sep), Span::raw(" "),
+            Span::styled("Space", key_style), Span::raw(" menu "),
+            Span::styled("│", sep), Span::raw(" "),
+            Span::styled("q", key_style), Span::raw(" quit"),
+        ])
     };
-    f.render_widget(Paragraph::new(Line::from(status)), outer[1]);
+    f.render_widget(
+        Paragraph::new(status_line)
+            .block(Block::default().borders(Borders::TOP).border_style(Style::default().fg(Color::DarkGray))),
+        outer[1],
+    );
 
     // Leader menu
     if app.leader_active {
         let menu_lines = vec![
             Line::from(Span::styled(" Space Leader Menu", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
             Line::from(""),
-            Line::from(vec![Span::styled(" h", Style::default().fg(Color::Cyan)), Span::raw("  → Components panel")]),
-            Line::from(vec![Span::styled(" j", Style::default().fg(Color::Cyan)), Span::raw("  → Detail panel")]),
-            Line::from(vec![Span::styled(" k", Style::default().fg(Color::Cyan)), Span::raw("  → Events panel")]),
-            Line::from(vec![Span::styled(" l", Style::default().fg(Color::Cyan)), Span::raw("  → Events panel")]),
+            Line::from(vec![Span::styled(" h", Style::default().fg(Color::Cyan)), Span::raw("  → Left panel")]),
+            Line::from(vec![Span::styled(" j", Style::default().fg(Color::Cyan)), Span::raw("  → Below panel")]),
+            Line::from(vec![Span::styled(" k", Style::default().fg(Color::Cyan)), Span::raw("  → Above panel")]),
+            Line::from(vec![Span::styled(" l", Style::default().fg(Color::Cyan)), Span::raw("  → Right panel")]),
             Line::from(vec![Span::styled(" c", Style::default().fg(Color::Cyan)), Span::raw("  → Clear all events")]),
             Line::from(vec![Span::styled(" p", Style::default().fg(Color::Cyan)), Span::raw("  → Pause/resume stream")]),
+            Line::from(vec![Span::styled(" ,", Style::default().fg(Color::Cyan)), Span::raw("  → Edit config")]),
             Line::from(""),
             Line::from(Span::styled(" Esc/any  → cancel", Style::default().fg(Color::DarkGray))),
         ];
