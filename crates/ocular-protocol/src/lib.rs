@@ -1,8 +1,10 @@
 pub mod resp;
 pub mod mysql;
+pub mod amqp;
 
 pub use resp::{RespValue, parse_resp};
 pub use mysql::{parse_mysql_request, parse_mysql_response};
+pub use amqp::{parse_amqp_request, parse_amqp_response, format_amqp_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method};
 
 use std::time::{Duration, SystemTime};
 
@@ -36,6 +38,7 @@ pub enum Direction {
 pub enum Protocol {
     Redis,
     Mysql,
+    Amqp,
 }
 
 impl Protocol {
@@ -43,6 +46,7 @@ impl Protocol {
         match s.to_lowercase().as_str() {
             "redis" => Some(Protocol::Redis),
             "mysql" => Some(Protocol::Mysql),
+            "amqp" | "rabbitmq" => Some(Protocol::Amqp),
             _ => None,
         }
     }
@@ -56,6 +60,9 @@ pub fn parse_request(protocol: Protocol, buf: &[u8]) -> Option<String> {
         }
         Protocol::Mysql => {
             parse_mysql_request(buf).map(|pkt| pkt.to_summary())
+        }
+        Protocol::Amqp => {
+            parse_amqp_request(buf)
         }
     }
 }
@@ -78,6 +85,9 @@ pub fn extract_full_command(protocol: Protocol, buf: &[u8]) -> Option<String> {
                 parse_mysql_request(buf).map(|pkt| pkt.to_summary())
             }
         }
+        Protocol::Amqp => {
+            parse_amqp_request(buf)
+        }
     }
 }
 
@@ -90,6 +100,9 @@ pub fn parse_response(protocol: Protocol, buf: &[u8]) -> Option<String> {
         Protocol::Mysql => {
             parse_mysql_response(buf).map(|r| r.to_summary())
         }
+        Protocol::Amqp => {
+            parse_amqp_response(buf)
+        }
     }
 }
 
@@ -101,6 +114,9 @@ pub fn format_response_detail(protocol: Protocol, buf: &[u8]) -> Option<String> 
         }
         Protocol::Mysql => {
             parse_mysql_response(buf).map(|r| r.to_display())
+        }
+        Protocol::Amqp => {
+            format_amqp_response_detail(buf)
         }
     }
 }

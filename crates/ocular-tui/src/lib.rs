@@ -483,7 +483,7 @@ fn ui(f: &mut Frame, app: &mut App) {
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
         .collect::<Vec<_>>().join("\n");
     let detail_border = if detail_focused { Style::default().fg(Color::Cyan) } else { Style::default() };
-    let title = if detail_focused { " Detail (j/k scroll, y copy, e edit) " } else { " Detail " };
+    let title = if detail_focused { " Detail (j/k: scroll, e: edit, esc: back to Events) " } else { " Detail " };
     // Clamp scroll
     let detail_view_width = right[1].width.saturating_sub(2).max(1) as usize;
     let wrapped_lines: u16 = detail_str_for_scroll.lines()

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ocular_protocol::{Protocol, parse_request, parse_response, extract_full_command, format_response_detail};
+use ocular_protocol::{Protocol, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -84,18 +84,52 @@ async fn handle_conn(
 
     let name_req = name.to_string();
     let name_resp = name.to_string();
+    let tx_req = tx.clone();
     let tx_resp = tx.clone();
     let pending_w = pending.clone();
     let pending_r = pending;
     let process_info = process;
 
+    let process_req = process_info.clone();
     let client_to_server = async move {
         let mut buf = [0u8; 65536];
         loop {
             let n = cr.read(&mut buf).await?;
             if n == 0 { break; }
             let data = &buf[..n];
-            if let Some(command) = parse_request(protocol, data) {
+
+            if protocol == Protocol::Amqp {
+                // AMQP: check if this is a fire-and-forget method (e.g. Basic.Publish)
+                if let Some(frame) = parse_amqp_frame(data) {
+                    if let Some(ref method) = frame.method {
+                        if is_async_method(method.class_id, method.method_id) {
+                            // Emit immediately — no server response expected
+                            let (summary, detail) = parse_amqp_request_full(data)
+                                .unwrap_or_else(|| (method.summary.clone(), method.detail.clone()));
+                            let _ = tx_req.send(ProxyEvent {
+                                timestamp: SystemTime::now(),
+                                component: name_req.clone(),
+                                protocol,
+                                command: summary.clone(),
+                                full_command: detail.clone(),
+                                response: String::new(),
+                                response_detail: detail,
+                                latency: std::time::Duration::ZERO,
+                                process: process_req.clone(),
+                            });
+                        } else {
+                            // Expects a response — store as pending
+                            debug!(component = %name_req, command = %method.summary);
+                            *pending_w.lock().await = Some(PendingRequest {
+                                timestamp: SystemTime::now(),
+                                instant: Instant::now(),
+                                command: method.summary.clone(),
+                                full_command: method.detail.clone(),
+                            });
+                        }
+                    }
+                }
+            } else if let Some(command) = parse_request(protocol, data) {
                 let full_command = extract_full_command(protocol, data).unwrap_or_else(|| command.clone());
                 debug!(component = %name_req, %command);
                 *pending_w.lock().await = Some(PendingRequest {
@@ -105,6 +139,7 @@ async fn handle_conn(
                     full_command,
                 });
             }
+
             sw.write_all(data).await?;
         }
         Ok::<_, anyhow::Error>(())
@@ -146,6 +181,38 @@ async fn handle_conn(
                         mysql_buf.clear();
                         awaiting_response = false;
                     }
+                }
+            } else if protocol == Protocol::Amqp {
+                // AMQP: bidirectional — server can push frames without a prior request
+                if let Some(req) = pending_r.lock().await.take() {
+                    let latency = req.instant.elapsed();
+                    let response = parse_response(protocol, data).unwrap_or_default();
+                    let response_detail = format_response_detail(protocol, data).unwrap_or_else(|| response.clone());
+                    let _ = tx_resp.send(ProxyEvent {
+                        timestamp: req.timestamp,
+                        component: name_resp.clone(),
+                        protocol,
+                        command: req.command,
+                        full_command: req.full_command,
+                        response,
+                        response_detail,
+                        latency,
+                        process: process_info.clone(),
+                    });
+                } else if let Some(response) = parse_response(protocol, data) {
+                    // Server-initiated frame (e.g. Basic.Deliver)
+                    let response_detail = format_response_detail(protocol, data).unwrap_or_else(|| response.clone());
+                    let _ = tx_resp.send(ProxyEvent {
+                        timestamp: SystemTime::now(),
+                        component: name_resp.clone(),
+                        protocol,
+                        command: response.clone(),
+                        full_command: response_detail.clone(),
+                        response: String::new(),
+                        response_detail,
+                        latency: std::time::Duration::ZERO,
+                        process: process_info.clone(),
+                    });
                 }
             } else {
                 // Redis: single request/response per read
