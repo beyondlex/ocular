@@ -34,8 +34,10 @@ pub async fn run_proxy(
         let name = name.clone();
         let tx = tx.clone();
         let process = resolve_peer_process(peer.port());
+        let peer_addr = peer.to_string();
+        let remote_for_conn = remote.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(client, &remote, &name, protocol, &tx, process).await {
+            if let Err(e) = handle_conn(client, &remote, &name, protocol, &tx, process, peer_addr, remote_for_conn).await {
                 warn!(component = %name, remote = %remote, error = %e, "connection ended with error");
             }
         });
@@ -49,6 +51,8 @@ async fn handle_conn(
     protocol: Protocol,
     tx: &broadcast::Sender<ProxyEvent>,
     process: Option<String>,
+    src: String,
+    dest: String,
 ) -> Result<()> {
     let mut server = match TcpStream::connect(remote_addr).await {
         Ok(s) => {
@@ -104,6 +108,8 @@ async fn handle_conn(
             response_detail: response.into(),
             latency: std::time::Duration::ZERO,
             process: process.clone(),
+            src: Some(src.clone()),
+            dest: Some(dest.clone()),
         });
         // If server said 'S' (SSL), we'd need to upgrade — but we don't support that
         // Most local setups respond 'N'
@@ -123,6 +129,10 @@ async fn handle_conn(
     let process_info = process;
 
     let process_req = process_info.clone();
+    let src_req = src.clone();
+    let dest_req = dest.clone();
+    let src_resp = src.clone();
+    let dest_resp = dest;
     let client_to_server = async move {
         let mut buf = [0u8; 65536];
         loop {
@@ -156,6 +166,8 @@ async fn handle_conn(
                                     response_detail: detail,
                                     latency: std::time::Duration::ZERO,
                                     process: process_req.clone(),
+                                    src: Some(src_req.clone()),
+                                    dest: Some(dest_req.clone()),
                                 });
                             } else {
                                 debug!(component = %name_req, command = %method.summary);
@@ -219,6 +231,8 @@ async fn handle_conn(
                                 response_detail,
                                 latency,
                                 process: process_mysql.clone(),
+                                src: Some(src_resp.clone()),
+                                dest: Some(dest_resp.clone()),
                             });
                         }
                         mysql_buf.clear();
@@ -285,6 +299,8 @@ async fn handle_conn(
                             response_detail,
                             latency,
                             process: process_info.clone(),
+                                    src: Some(src_resp.clone()),
+                                    dest: Some(dest_resp.clone()),
                         });
                     } else if let Some(frame) = parse_amqp_frame(frame_data) {
                         // Server-initiated method (e.g. Basic.Deliver) — emit as standalone
@@ -302,6 +318,8 @@ async fn handle_conn(
                                 response_detail,
                                 latency: std::time::Duration::ZERO,
                                 process: process_info.clone(),
+                                    src: Some(src_resp.clone()),
+                                    dest: Some(dest_resp.clone()),
                             });
                         }
                     }
@@ -330,6 +348,8 @@ async fn handle_conn(
                             response_detail,
                             latency,
                             process: process_info.clone(),
+                                    src: Some(src_resp.clone()),
+                                    dest: Some(dest_resp.clone()),
                         });
                     }
                 }
@@ -350,6 +370,8 @@ async fn handle_conn(
                         response_detail,
                         latency,
                         process: process_info.clone(),
+                        src: Some(src_resp.clone()),
+                        dest: Some(dest_resp.clone()),
                     });
                 }
             }

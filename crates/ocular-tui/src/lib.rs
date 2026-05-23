@@ -718,6 +718,8 @@ fn ui(f: &mut Frame, app: &mut App) {
                             "command" => (ev.command.clone(), theme.command),
                             "latency" => (format!("{}", lat), theme.latency),
                             "process" => (ev.process.clone().unwrap_or_default(), theme.latency),
+                            "src" => (ev.src.clone().unwrap_or_default(), Style::default().fg(Color::Blue)),
+                            "dest" => (ev.dest.clone().unwrap_or_default(), Style::default().fg(Color::Cyan)),
                             _ => (String::new(), Style::default()),
                         };
                         let formatted = match width {
@@ -826,6 +828,12 @@ fn ui(f: &mut Frame, app: &mut App) {
         // Build metadata line
         let mut meta_parts: Vec<Span> = Vec::new();
         meta_parts.push(Span::raw(format!("{}  ", format_time(&ev.timestamp))));
+        if let Some(s) = &ev.src {
+            meta_parts.push(Span::styled(format!("{}  ", s), Style::default().fg(Color::Blue)));
+        }
+        if let Some(d) = &ev.dest {
+            meta_parts.push(Span::styled(format!("→ {}  ", d), Style::default().fg(Color::Cyan)));
+        }
         if let Some(p) = &ev.process {
             meta_parts.push(Span::styled(format!("{}  ", p), Style::default().fg(Color::DarkGray)));
         }

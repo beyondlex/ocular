@@ -27,6 +27,10 @@ pub struct ProxyEvent {
     pub latency: Duration,
     /// Process that initiated the connection (PID + name)
     pub process: Option<String>,
+    /// Client address (source)
+    pub src: Option<String>,
+    /// Remote address (destination)
+    pub dest: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
