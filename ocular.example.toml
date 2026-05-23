@@ -90,3 +90,10 @@ name = "elasticsearch"
 protocol = "http"
 listen = "127.0.0.1:19200"   # Your app connects here
 remote = "127.0.0.1:9200"    # Real Elasticsearch address
+
+
+[[proxy]]
+name = "api-prod"
+protocol = "http"
+listen = "127.0.0.1:18443"          # 应用连这里 (HTTP 明文)
+remote = "https://localhost:8443"    # Ocular 用 TLS 连目标
