@@ -2,7 +2,7 @@ use anyhow::Result;
 use ocular_protocol::{Protocol, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, Mutex};
 use tracing::{info, warn, error, debug};
@@ -54,26 +54,55 @@ async fn handle_conn(
     src: String,
     dest: String,
 ) -> Result<()> {
-    let mut server = match TcpStream::connect(remote_addr).await {
+    // Parse remote address: detect https:// for TLS outbound
+    let (actual_addr, use_tls, tls_host) = if remote_addr.starts_with("https://") {
+        let stripped = remote_addr.strip_prefix("https://").unwrap();
+        let host = stripped.split(':').next().unwrap_or(stripped).to_string();
+        (stripped.to_string(), true, host)
+    } else {
+        let stripped = remote_addr.strip_prefix("http://").unwrap_or(remote_addr);
+        (stripped.to_string(), false, String::new())
+    };
+
+    let tcp_stream = match TcpStream::connect(&actual_addr).await {
         Ok(s) => {
-            debug!(component = %name, remote = %remote_addr, "connected to remote");
+            debug!(component = %name, remote = %actual_addr, "connected to remote");
             s
         }
         Err(e) => {
-            error!(component = %name, remote = %remote_addr, error = %e,
+            error!(component = %name, remote = %actual_addr, error = %e,
                 "failed to connect to remote — is the service running?");
             if protocol == Protocol::Redis {
-                let err_msg = format!("-ERR ocular proxy: cannot reach {} ({})\r\n", remote_addr, e);
+                let err_msg = format!("-ERR ocular proxy: cannot reach {} ({})\r\n", actual_addr, e);
                 let _ = client.write_all(err_msg.as_bytes()).await;
             }
             return Err(e.into());
         }
     };
 
+    let (sr, sw): (Box<dyn AsyncRead + Unpin + Send>, Box<dyn AsyncWrite + Unpin + Send>) = if use_tls {
+        let config = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerify))
+            .with_no_client_auth();
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+        let domain = rustls::pki_types::ServerName::try_from(tls_host)
+            .map_err(|e| anyhow::anyhow!("invalid TLS hostname: {}", e))?;
+        let tls_stream = connector.connect(domain, tcp_stream).await?;
+        let (r, w) = tokio::io::split(tls_stream);
+        (Box::new(r) as Box<dyn AsyncRead + Unpin + Send>, Box::new(w) as Box<dyn AsyncWrite + Unpin + Send>)
+    } else {
+        let (r, w) = tokio::io::split(tcp_stream);
+        (Box::new(r) as Box<dyn AsyncRead + Unpin + Send>, Box::new(w) as Box<dyn AsyncWrite + Unpin + Send>)
+    };
+
+    let mut sr = sr;
+    let mut sw = sw;
+
     // For MySQL: strip SSL from greeting
     if protocol == Protocol::Mysql {
         let mut greeting_buf = [0u8; 65536];
-        let n = server.read(&mut greeting_buf).await?;
+        let n = sr.read(&mut greeting_buf).await?;
         if n == 0 { return Ok(()); }
         let mut greeting = greeting_buf[..n].to_vec();
         strip_mysql_ssl_flag(&mut greeting);
@@ -88,10 +117,10 @@ async fn handle_conn(
         if n == 0 { return Ok(()); }
         let data = &buf[..n];
         // Forward SSLRequest to server
-        server.write_all(data).await?;
+        sw.write_all(data).await?;
         // Read server's SSL response (single byte N or S)
         let mut resp = [0u8; 1];
-        let rn = server.read(&mut resp).await?;
+        let rn = sr.read(&mut resp).await?;
         if rn == 0 { return Ok(()); }
         // Forward to client
         client.write_all(&resp[..rn]).await?;
@@ -116,7 +145,6 @@ async fn handle_conn(
     }
 
     let (mut cr, mut cw) = client.split();
-    let (mut sr, mut sw) = server.split();
 
     let pending: Arc<Mutex<Option<PendingRequest>>> = Arc::new(Mutex::new(None));
 
@@ -519,5 +547,41 @@ fn resolve_peer_process(port: u16) -> Option<String> {
             }
         }
         None
+    }
+}
+
+/// TLS certificate verifier that accepts any certificate (for proxying to known backends).
+#[derive(Debug)]
+struct NoVerify;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerify {
+    fn verify_server_cert(
+        &self, _: &rustls::pki_types::CertificateDer<'_>, _: &[rustls::pki_types::CertificateDer<'_>],
+        _: &rustls::pki_types::ServerName<'_>, _: &[u8], _: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self, _: &[u8], _: &rustls::pki_types::CertificateDer<'_>, _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self, _: &[u8], _: &rustls::pki_types::CertificateDer<'_>, _: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+        ]
     }
 }
