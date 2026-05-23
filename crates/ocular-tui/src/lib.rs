@@ -111,6 +111,7 @@ struct App {
     paused_buffer: Vec<ocular_protocol::ProxyEvent>,
     exclude_matchers: std::collections::HashMap<String, ExcludeMatcher>,
     event_format: EventFormat,
+    latency_threshold_ms: Option<f64>,
 }
 
 impl App {
@@ -209,6 +210,8 @@ struct ReloadableConfig {
     theme_overrides: Option<ThemeConfig>,
     #[serde(default)]
     event_format: Option<String>,
+    #[serde(default)]
+    latency_threshold_ms: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +275,7 @@ pub async fn run(
         paused_buffer: Vec::new(),
         exclude_matchers,
         event_format: fmt,
+        latency_threshold_ms: None,
     };
 
     let mut last_mtime = std::fs::metadata(&config_path).ok()
@@ -653,6 +657,9 @@ fn reload_config(app: &mut App, cfg: &ReloadableConfig) {
     app.event_format = cfg.event_format.as_deref()
         .map(EventFormat::parse)
         .unwrap_or_else(EventFormat::default_format);
+
+    // Reload latency threshold
+    app.latency_threshold_ms = cfg.latency_threshold_ms;
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
@@ -736,7 +743,14 @@ fn ui(f: &mut Frame, app: &mut App) {
                             "time" => (time.clone(), theme.timestamp),
                             "component" => (format!("{}", ev.component), theme.component_style(&ev.component)),
                             "command" => (ev.command.clone(), theme.command),
-                            "latency" => (format!("{}", lat), theme.latency),
+                            "latency" => {
+                                let style = if app.latency_threshold_ms.map_or(false, |t| ev.latency.as_secs_f64() * 1000.0 > t) {
+                                    Style::default().fg(Color::Red)
+                                } else {
+                                    theme.latency
+                                };
+                                (format!("{}", lat), style)
+                            },
                             "process" => (ev.process.clone().unwrap_or_default(), theme.latency),
                             "src" => (ev.src.clone().unwrap_or_default(), Style::default().fg(Color::Blue)),
                             "dest" => (ev.dest.clone().unwrap_or_default(), Style::default().fg(Color::Cyan)),
