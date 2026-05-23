@@ -54,41 +54,78 @@ pub fn parse_mongo_request(buf: &[u8]) -> Option<String> {
     Some(detail)
 }
 
-/// Extract full command detail (for Detail panel) — includes document contents.
+/// Extract full command detail (for Detail panel) — mongosh-style replayable statements.
 pub fn extract_mongo_full_command(buf: &[u8]) -> Option<String> {
     let doc = extract_body_doc(buf)?;
     let cmd = first_key(&doc)?;
     let db = get_string_field(&doc, "$db").unwrap_or_default();
     match cmd.as_str() {
+        "find" => {
+            let coll = get_string_field(&doc, "find").unwrap_or_default();
+            let filter = get_doc_field_summary(&doc, "filter");
+            let limit = get_i32_field(&doc, "limit");
+            let sort = get_raw_doc_field(&doc, "sort").map(|d| bson_doc_to_json_like(&d));
+            let mut s = format!("db.{}.find({})", coll, filter);
+            if let Some(sort_str) = sort { s.push_str(&format!(".sort({})", sort_str)); }
+            if let Some(l) = limit { s.push_str(&format!(".limit({})", l)); }
+            Some(s)
+        }
         "insert" => {
             let coll = get_string_field(&doc, "insert").unwrap_or_default();
             let docs = get_array_docs(&doc, "documents");
-            let mut lines = vec![format!("insert {}.{} ({} docs)", db, coll, docs.len())];
-            for (i, d) in docs.iter().enumerate().take(10) {
-                lines.push(format!("  [{}] {}", i, bson_doc_to_json_like(d)));
+            if docs.len() == 1 {
+                Some(format!("db.{}.insertOne({})", coll, bson_doc_to_json_like(&docs[0])))
+            } else {
+                let items: Vec<String> = docs.iter().take(10).map(|d| bson_doc_to_json_like(d)).collect();
+                let mut s = format!("db.{}.insertMany([{}])", coll, items.join(", "));
+                if docs.len() > 10 { s.push_str(&format!(" // +{} more", docs.len() - 10)); }
+                Some(s)
             }
-            if docs.len() > 10 { lines.push(format!("  ... ({} more)", docs.len() - 10)); }
-            Some(lines.join("\n"))
         }
         "update" => {
             let coll = get_string_field(&doc, "update").unwrap_or_default();
             let updates = get_array_docs(&doc, "updates");
-            let mut lines = vec![format!("update {}.{} ({} ops)", db, coll, updates.len())];
-            for (i, d) in updates.iter().enumerate().take(5) {
-                lines.push(format!("  [{}] {}", i, bson_doc_to_json_like(d)));
+            if updates.len() == 1 {
+                let q = get_doc_field_summary(&updates[0], "q");
+                let u = get_doc_field_summary(&updates[0], "u");
+                let multi = get_i32_field(&updates[0], "multi").unwrap_or(0) != 0
+                    || has_field(&updates[0], "multi") && get_f64_field(&updates[0], "multi") == Some(1.0);
+                let method = if multi { "updateMany" } else { "updateOne" };
+                Some(format!("db.{}.{}({}, {})", coll, method, q, u))
+            } else {
+                Some(format!("db.{}.bulkWrite([...{} ops])", coll, updates.len()))
             }
-            Some(lines.join("\n"))
         }
         "delete" => {
             let coll = get_string_field(&doc, "delete").unwrap_or_default();
             let deletes = get_array_docs(&doc, "deletes");
-            let mut lines = vec![format!("delete {}.{} ({} ops)", db, coll, deletes.len())];
-            for (i, d) in deletes.iter().enumerate().take(5) {
-                lines.push(format!("  [{}] {}", i, bson_doc_to_json_like(d)));
+            if deletes.len() == 1 {
+                let q = get_doc_field_summary(&deletes[0], "q");
+                let limit = get_i32_field(&deletes[0], "limit").unwrap_or(0);
+                let method = if limit == 1 { "deleteOne" } else { "deleteMany" };
+                Some(format!("db.{}.{}({})", coll, method, q))
+            } else {
+                Some(format!("db.{}.bulkWrite([...{} ops])", coll, deletes.len()))
             }
-            Some(lines.join("\n"))
         }
-        _ => parse_mongo_request(buf),
+        "aggregate" => {
+            let coll = get_string_field(&doc, "aggregate").unwrap_or_default();
+            Some(format!("db.{}.aggregate([...])", coll))
+        }
+        "findAndModify" => {
+            let coll = get_string_field(&doc, "findAndModify").unwrap_or_default();
+            let query = get_doc_field_summary(&doc, "query");
+            let update = get_doc_field_summary(&doc, "update");
+            Some(format!("db.{}.findOneAndUpdate({}, {})", coll, query, update))
+        }
+        "count" | "countDocuments" => {
+            let coll = get_string_field(&doc, &cmd).unwrap_or_default();
+            let query = get_doc_field_summary(&doc, "query");
+            Some(format!("db.{}.countDocuments({})", coll, query))
+        }
+        _ => {
+            if db.is_empty() { Some(cmd) } else { Some(format!("{} {}", cmd, db)) }
+        }
     }
 }
 
@@ -438,6 +475,7 @@ fn bson_doc_to_json_like(doc: &[u8]) -> String {
             0x12 => { let v = if pos + 8 <= doc.len() { i64::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3], doc[pos+4], doc[pos+5], doc[pos+6], doc[pos+7]]) } else { 0 }; pos += 8; format!("{}", v) }
             _ => { break; }
         };
+        if key == "_id" || key == "lsid" { continue; }
         parts.push(format!("{}: {}", key, val));
         if parts.len() >= 8 { parts.push("...".into()); break; }
     }
