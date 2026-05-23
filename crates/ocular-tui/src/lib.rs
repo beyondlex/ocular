@@ -751,7 +751,6 @@ fn ui(f: &mut Frame, app: &mut App) {
         String::new()
     };
     let events_border = if events_focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
-    let visual_info = if app.visual_mode { " [VISUAL]" } else { "" };
     let paused_info = if app.paused { " ⏸ PAUSED" } else { "" };
     let ek = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
     let mut title_spans = vec![
@@ -764,7 +763,6 @@ fn ui(f: &mut Frame, app: &mut App) {
     if app.paused {
         title_spans.push(Span::styled(paused_info, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)));
     }
-    title_spans.push(Span::raw(visual_info));
     title_spans.push(Span::raw(format!("{}{} ", filter_info, count_info)));
     let event_list = List::new(event_items)
         .block(Block::default().borders(Borders::TOP).border_style(events_border)
@@ -883,10 +881,17 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Bottom status bar
     let key_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
     let sep = Style::default().fg(Color::DarkGray);
-    let status_line = if app.focus == Focus::Filter {
-        Line::from(Span::styled(format!("/{}", app.filter), Style::default().fg(Color::Yellow)))
+    let status_line: (Line, Line) = if app.focus == Focus::Filter {
+        (Line::from(Span::styled(format!("/{}", app.filter), Style::default().fg(Color::Yellow))), Line::from(""))
     } else {
-        Line::from(vec![
+        let mode_span = if app.leader_active {
+            Span::styled(" LEADER ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        } else if app.visual_mode {
+            Span::styled(" VISUAL ", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD))
+        } else {
+            Span::styled(" NORMAL ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        };
+        let left_line = Line::from(vec![
             Span::raw(" "),
             Span::styled("Tab", key_style), Span::raw(" cycle "),
             Span::styled("│", sep), Span::raw(" "),
@@ -896,16 +901,20 @@ fn ui(f: &mut Frame, app: &mut App) {
             Span::styled("│", sep), Span::raw(" "),
             Span::styled("Space", key_style), Span::raw(" menu "),
             Span::styled("│", sep), Span::raw(" "),
-            Span::styled("q", key_style), Span::raw(" quit "),
-            Span::styled("│", sep), Span::raw(" "),
-            Span::styled("☰", if app.leader_active { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) }),
-        ])
+            Span::styled("q", key_style), Span::raw(" quit"),
+        ]);
+        let right_line = Line::from(vec![mode_span]);
+        (left_line, right_line)
     };
-    f.render_widget(
-        Paragraph::new(status_line)
-            .block(Block::default().borders(Borders::TOP | Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray))),
-        outer[1],
-    );
+    let status_block = Block::default().borders(Borders::TOP | Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray));
+    let status_inner = status_block.inner(outer[1]);
+    f.render_widget(status_block, outer[1]);
+    let status_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(1), Constraint::Length(8)])
+        .split(status_inner);
+    f.render_widget(Paragraph::new(status_line.0), status_chunks[0]);
+    f.render_widget(Paragraph::new(status_line.1).alignment(ratatui::layout::Alignment::Right), status_chunks[1]);
 
     // Leader menu
     if app.leader_active && app.show_leader_menu {
