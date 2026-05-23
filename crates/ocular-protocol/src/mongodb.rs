@@ -481,3 +481,131 @@ fn bson_doc_to_json_like(doc: &[u8]) -> String {
     }
     format!("{{{}}}", parts.join(", "))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal OP_MSG with a Kind 0 BSON body document.
+    fn build_op_msg(doc: &[u8]) -> Vec<u8> {
+        let msg_len = 16 + 4 + 1 + doc.len(); // header + flags + kind + doc
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(msg_len as i32).to_le_bytes()); // messageLength
+        buf.extend_from_slice(&1i32.to_le_bytes()); // requestID
+        buf.extend_from_slice(&0i32.to_le_bytes()); // responseTo
+        buf.extend_from_slice(&OP_MSG.to_le_bytes()); // opCode
+        buf.extend_from_slice(&0u32.to_le_bytes()); // flagBits
+        buf.push(0); // kind 0
+        buf.extend_from_slice(doc);
+        buf
+    }
+
+    /// Build a simple BSON document: {"cmd": "coll", "$db": "testdb"}
+    fn build_simple_cmd(cmd: &str, coll: &str) -> Vec<u8> {
+        let mut doc = Vec::new();
+        doc.extend_from_slice(&[0; 4]); // placeholder for size
+        // cmd: coll (string)
+        doc.push(0x02); // string type
+        doc.extend_from_slice(cmd.as_bytes());
+        doc.push(0);
+        let val = format!("{}\0", coll);
+        doc.extend_from_slice(&(val.len() as i32).to_le_bytes());
+        doc.extend_from_slice(val.as_bytes());
+        // $db: "testdb" (string)
+        doc.push(0x02);
+        doc.extend_from_slice(b"$db\0");
+        let db = "testdb\0";
+        doc.extend_from_slice(&(db.len() as i32).to_le_bytes());
+        doc.extend_from_slice(db.as_bytes());
+        // end
+        doc.push(0);
+        let len = doc.len() as i32;
+        doc[0..4].copy_from_slice(&len.to_le_bytes());
+        doc
+    }
+
+    #[test]
+    fn test_parse_find_request() {
+        let doc = build_simple_cmd("find", "users");
+        let buf = build_op_msg(&doc);
+        let result = parse_mongo_request(&buf).unwrap();
+        assert!(result.contains("find"));
+        assert!(result.contains("testdb"));
+        assert!(result.contains("users"));
+    }
+
+    #[test]
+    fn test_parse_insert_request() {
+        let doc = build_simple_cmd("insert", "users");
+        let buf = build_op_msg(&doc);
+        let result = parse_mongo_request(&buf).unwrap();
+        assert!(result.contains("insert"));
+        assert!(result.contains("testdb.users"));
+    }
+
+    #[test]
+    fn test_parse_response_ok() {
+        // {"ok": 1.0}
+        let mut doc = Vec::new();
+        doc.extend_from_slice(&[0; 4]);
+        doc.push(0x01); // double
+        doc.extend_from_slice(b"ok\0");
+        doc.extend_from_slice(&1.0f64.to_le_bytes());
+        doc.push(0);
+        let len = doc.len() as i32;
+        doc[0..4].copy_from_slice(&len.to_le_bytes());
+
+        let buf = build_op_msg(&doc);
+        let result = parse_mongo_response(&buf).unwrap();
+        assert_eq!(result, "OK");
+    }
+
+    #[test]
+    fn test_parse_response_error() {
+        // {"ok": 0.0, "errmsg": "not found", "code": 26}
+        let mut doc = Vec::new();
+        doc.extend_from_slice(&[0; 4]);
+        // ok: 0.0
+        doc.push(0x01);
+        doc.extend_from_slice(b"ok\0");
+        doc.extend_from_slice(&0.0f64.to_le_bytes());
+        // errmsg: "not found"
+        doc.push(0x02);
+        doc.extend_from_slice(b"errmsg\0");
+        let msg = "not found\0";
+        doc.extend_from_slice(&(msg.len() as i32).to_le_bytes());
+        doc.extend_from_slice(msg.as_bytes());
+        // code: 26
+        doc.push(0x10);
+        doc.extend_from_slice(b"code\0");
+        doc.extend_from_slice(&26i32.to_le_bytes());
+        doc.push(0);
+        let len = doc.len() as i32;
+        doc[0..4].copy_from_slice(&len.to_le_bytes());
+
+        let buf = build_op_msg(&doc);
+        let result = parse_mongo_response(&buf).unwrap();
+        assert!(result.contains("ERR"));
+        assert!(result.contains("26"));
+        assert!(result.contains("not found"));
+    }
+
+    #[test]
+    fn test_mongo_msg_len() {
+        let buf = build_op_msg(&build_simple_cmd("ping", "admin"));
+        assert_eq!(mongo_msg_len(&buf), Some(buf.len()));
+    }
+
+    #[test]
+    fn test_mongo_msg_len_too_short() {
+        assert_eq!(mongo_msg_len(&[1, 2, 3]), None);
+    }
+
+    #[test]
+    fn test_extract_full_command_find() {
+        let doc = build_simple_cmd("find", "users");
+        let buf = build_op_msg(&doc);
+        let result = extract_mongo_full_command(&buf).unwrap();
+        assert!(result.contains("db.users.find"));
+    }
+}

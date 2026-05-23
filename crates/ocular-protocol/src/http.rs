@@ -204,3 +204,87 @@ fn simple_json_format(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_http_request_get() {
+        let req = b"GET /users/_doc/1 HTTP/1.1\r\nHost: localhost:9200\r\n\r\n";
+        assert_eq!(parse_http_request(req), Some("GET /users/_doc/1".into()));
+    }
+
+    #[test]
+    fn test_parse_http_request_post_with_body() {
+        let req = b"POST /users/_search HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"size\": 5}";
+        assert_eq!(parse_http_request(req), Some("POST /users/_search".into()));
+    }
+
+    #[test]
+    fn test_extract_full_command_filters_noise_headers() {
+        let req = b"GET /index HTTP/1.1\r\nHost: localhost\r\nUser-Agent: curl/8.0\r\nAccept: */*\r\nAuthorization: Bearer token\r\n\r\n";
+        let full = extract_http_full_command(req).unwrap();
+        assert!(full.contains("Authorization: Bearer token"));
+        assert!(!full.contains("Host:"));
+        assert!(!full.contains("User-Agent:"));
+    }
+
+    #[test]
+    fn test_extract_full_command_with_body() {
+        let req = b"POST /test HTTP/1.1\r\nContent-Type: application/json\r\nContent-Length: 13\r\n\r\n{\"key\":\"val\"}";
+        let full = extract_http_full_command(req).unwrap();
+        assert!(full.contains("POST /test"));
+        assert!(full.contains("[Request Body]"));
+        assert!(full.contains("{\"key\":\"val\"}"));
+    }
+
+    #[test]
+    fn test_parse_http_response() {
+        let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+        assert_eq!(parse_http_response(resp), Some("200 OK".into()));
+    }
+
+    #[test]
+    fn test_parse_http_response_404() {
+        let resp = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(parse_http_response(resp), Some("404 Not Found".into()));
+    }
+
+    #[test]
+    fn test_http_request_complete_no_body() {
+        let req = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert!(http_request_complete(req));
+    }
+
+    #[test]
+    fn test_http_request_incomplete_body() {
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\n12345";
+        assert!(!http_request_complete(req));
+    }
+
+    #[test]
+    fn test_http_request_complete_body() {
+        let req = b"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\n12345";
+        assert!(http_request_complete(req));
+    }
+
+    #[test]
+    fn test_http_response_complete_chunked() {
+        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+        assert!(http_response_complete(resp));
+    }
+
+    #[test]
+    fn test_http_response_incomplete_chunked() {
+        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
+        assert!(!http_response_complete(resp));
+    }
+
+    #[test]
+    fn test_decode_chunked_body() {
+        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        let detail = format_http_response_detail(resp).unwrap();
+        assert!(detail.contains("hello world"));
+    }
+}
