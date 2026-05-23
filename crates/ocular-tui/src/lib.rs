@@ -100,6 +100,9 @@ struct App {
     filter: String,
     pending_keys: String,
     leader_active: bool,
+    show_leader_menu: bool,
+    help_active: bool,
+    confirm_quit: bool,
     visual_mode: bool,
     visual_anchor: usize, // start of visual selection
     theme: Theme,
@@ -232,6 +235,7 @@ pub async fn run(
     theme: Theme,
     config_path: PathBuf,
     event_format: Option<String>,
+    show_leader_menu: bool,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -254,6 +258,9 @@ pub async fn run(
         filter: String::new(),
         pending_keys: String::new(),
         leader_active: false,
+        show_leader_menu,
+        help_active: false,
+        confirm_quit: false,
         visual_mode: false,
         visual_anchor: 0,
         theme,
@@ -315,6 +322,22 @@ pub async fn run(
                     continue;
                 }
 
+                if app.help_active {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('?') => { app.help_active = false; }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                if app.confirm_quit {
+                    match key.code {
+                        KeyCode::Char('y') => break,
+                        _ => { app.confirm_quit = false; }
+                    }
+                    continue;
+                }
+
                 if app.leader_active {
                     app.leader_active = false;
                     match key.code {
@@ -342,7 +365,8 @@ pub async fn run(
                 }
 
                 match key.code {
-                    KeyCode::Char('q') => break,
+                    KeyCode::Char('q') => { app.confirm_quit = true; }
+                    KeyCode::Char('?') => { app.help_active = !app.help_active; }
                     KeyCode::Char(' ') => {
                         app.pending_keys.clear();
                         app.leader_active = true;
@@ -385,6 +409,11 @@ pub async fn run(
                             Focus::Detail => Focus::Events,
                             Focus::Filter => Focus::Events,
                         };
+                        app.detail_scroll = 0;
+                    }
+                    KeyCode::Char('h') => { app.focus = Focus::Components; app.detail_scroll = 0; }
+                    KeyCode::Char('l') => {
+                        app.focus = if app.focus == Focus::Components { Focus::Events } else { Focus::Detail };
                         app.detail_scroll = 0;
                     }
                     KeyCode::Char('G') if app.focus == Focus::Events => {
@@ -867,7 +896,9 @@ fn ui(f: &mut Frame, app: &mut App) {
             Span::styled("│", sep), Span::raw(" "),
             Span::styled("Space", key_style), Span::raw(" menu "),
             Span::styled("│", sep), Span::raw(" "),
-            Span::styled("q", key_style), Span::raw(" quit"),
+            Span::styled("q", key_style), Span::raw(" quit "),
+            Span::styled("│", sep), Span::raw(" "),
+            Span::styled("☰", if app.leader_active { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) }),
         ])
     };
     f.render_widget(
@@ -877,7 +908,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     );
 
     // Leader menu
-    if app.leader_active {
+    if app.leader_active && app.show_leader_menu {
         let menu_lines = vec![
             Line::from(Span::styled(" Space Leader Menu", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
             Line::from(""),
@@ -894,13 +925,75 @@ fn ui(f: &mut Frame, app: &mut App) {
         let menu_height = menu_lines.len() as u16 + 2;
         let menu_width = 28;
         let area = f.area();
-        let x = (area.width.saturating_sub(menu_width)) / 2;
-        let y = (area.height.saturating_sub(menu_height)) / 2;
+        let x = area.width.saturating_sub(menu_width + 1);
+        let y = area.height.saturating_sub(menu_height + 1);
         let popup_area = Rect::new(x, y, menu_width, menu_height);
         f.render_widget(Clear, popup_area);
         let popup = Paragraph::new(menu_lines)
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)));
         f.render_widget(popup, popup_area);
+    }
+
+    // Confirm quit
+    if app.confirm_quit {
+        let msg = Line::from(vec![
+            Span::raw(" Quit? "),
+            Span::styled("y", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw("/"),
+            Span::styled("n", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+        ]);
+        let w: u16 = 12;
+        let area = f.area();
+        let x = (area.width.saturating_sub(w)) / 2;
+        let y = (area.height.saturating_sub(3)) / 2;
+        let popup_area = Rect::new(x, y, w, 3);
+        f.render_widget(Clear, popup_area);
+        f.render_widget(
+            Paragraph::new(msg).alignment(ratatui::layout::Alignment::Center)
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow))),
+            popup_area,
+        );
+    }
+
+    // Help popup
+    if app.help_active {
+        let help_lines = vec![
+            Line::from(Span::styled(" Keybindings", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))),
+            Line::from(""),
+            Line::from(vec![Span::styled(" Navigation", Style::default().add_modifier(Modifier::BOLD))]),
+            Line::from(vec![Span::styled("  j/k       ", Style::default().fg(Color::Green)), Span::raw("Navigate / scroll")]),
+            Line::from(vec![Span::styled("  h/l       ", Style::default().fg(Color::Green)), Span::raw("Switch panel left/right")]),
+            Line::from(vec![Span::styled("  Tab       ", Style::default().fg(Color::Green)), Span::raw("Next panel")]),
+            Line::from(vec![Span::styled("  gg        ", Style::default().fg(Color::Green)), Span::raw("Jump to first")]),
+            Line::from(vec![Span::styled("  G         ", Style::default().fg(Color::Green)), Span::raw("Jump to last")]),
+            Line::from(vec![Span::styled("  Ngg       ", Style::default().fg(Color::Green)), Span::raw("Jump to line N")]),
+            Line::from(""),
+            Line::from(vec![Span::styled(" Actions", Style::default().add_modifier(Modifier::BOLD))]),
+            Line::from(vec![Span::styled("  /         ", Style::default().fg(Color::Green)), Span::raw("Filter events")]),
+            Line::from(vec![Span::styled("  Enter     ", Style::default().fg(Color::Green)), Span::raw("Select component")]),
+            Line::from(vec![Span::styled("  v         ", Style::default().fg(Color::Green)), Span::raw("Visual selection")]),
+            Line::from(vec![Span::styled("  y         ", Style::default().fg(Color::Green)), Span::raw("Yank to clipboard")]),
+            Line::from(vec![Span::styled("  e         ", Style::default().fg(Color::Green)), Span::raw("Open in $EDITOR")]),
+            Line::from(vec![Span::styled("  Esc       ", Style::default().fg(Color::Green)), Span::raw("Back / clear filter")]),
+            Line::from(""),
+            Line::from(vec![Span::styled(" Leader (Space)", Style::default().add_modifier(Modifier::BOLD))]),
+            Line::from(vec![Span::styled("  c         ", Style::default().fg(Color::Green)), Span::raw("Clear all events")]),
+            Line::from(vec![Span::styled("  p         ", Style::default().fg(Color::Green)), Span::raw("Pause/resume")]),
+            Line::from(vec![Span::styled("  ,         ", Style::default().fg(Color::Green)), Span::raw("Edit config")]),
+            Line::from(""),
+            Line::from(Span::styled(" ?  toggle this help    q  quit", Style::default().fg(Color::DarkGray))),
+        ];
+        let help_height = help_lines.len() as u16 + 2;
+        let help_width = 40;
+        let area = f.area();
+        let x = (area.width.saturating_sub(help_width)) / 2;
+        let y = (area.height.saturating_sub(help_height)) / 2;
+        let help_area = Rect::new(x, y, help_width, help_height);
+        f.render_widget(Clear, help_area);
+        let help_popup = Paragraph::new(help_lines)
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)));
+        f.render_widget(help_popup, help_area);
     }
 }
 
