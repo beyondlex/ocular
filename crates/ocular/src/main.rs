@@ -22,6 +22,8 @@ pub struct Config {
     pub event_log: Option<EventLogConfig>,
     #[serde(default = "default_true")]
     pub leader_menu: bool,
+    #[serde(default = "default_true")]
+    pub quit_confirm: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -205,5 +207,5 @@ async fn main() -> Result<()> {
         base_theme
     };
 
-    ocular_tui::run(rx, components, theme, config_path, config.event_format, config.leader_menu).await
+    ocular_tui::run(rx, components, theme, config_path, config.event_format, config.leader_menu, config.quit_confirm).await
 }

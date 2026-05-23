@@ -103,6 +103,7 @@ struct App {
     show_leader_menu: bool,
     help_active: bool,
     confirm_quit: bool,
+    quit_confirm_enabled: bool,
     visual_mode: bool,
     visual_anchor: usize, // start of visual selection
     theme: Theme,
@@ -236,6 +237,7 @@ pub async fn run(
     config_path: PathBuf,
     event_format: Option<String>,
     show_leader_menu: bool,
+    quit_confirm: bool,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -261,6 +263,7 @@ pub async fn run(
         show_leader_menu,
         help_active: false,
         confirm_quit: false,
+        quit_confirm_enabled: quit_confirm,
         visual_mode: false,
         visual_anchor: 0,
         theme,
@@ -365,7 +368,7 @@ pub async fn run(
                 }
 
                 match key.code {
-                    KeyCode::Char('q') => { app.confirm_quit = true; }
+                    KeyCode::Char('q') => { if app.quit_confirm_enabled { app.confirm_quit = true; } else { break; } }
                     KeyCode::Char('?') => { app.help_active = !app.help_active; }
                     KeyCode::Char(' ') => {
                         app.pending_keys.clear();
@@ -824,8 +827,19 @@ fn ui(f: &mut Frame, app: &mut App) {
             // Response detail
             if !ev.response_detail.is_empty() {
                 lines.push(Line::from(""));
+                let mut in_json = false;
                 for rd in ev.response_detail.lines() {
-                    lines.push(Line::from(rd.to_string()));
+                    if rd == "[Response Body]" || rd == "[Request Body]" {
+                        in_json = ev.protocol == ocular_protocol::Protocol::Http;
+                        lines.push(Line::from(Span::styled(rd.to_string(), Style::default().fg(Color::DarkGray))));
+                    } else if rd.starts_with('[') && rd.ends_with(']') {
+                        in_json = false;
+                        lines.push(Line::from(Span::styled(rd.to_string(), Style::default().fg(Color::DarkGray))));
+                    } else if in_json {
+                        lines.push(highlight_json_line(rd));
+                    } else {
+                        lines.push(Line::from(rd.to_string()));
+                    }
                 }
             }
         }
@@ -1126,6 +1140,67 @@ fn highlight_sql_line(line: &str) -> Line<'static> {
             };
             spans.push(Span::styled(remaining[..ch_len].to_string(), style));
             remaining = &remaining[ch_len..];
+        }
+    }
+    Line::from(spans)
+}
+
+fn highlight_json_line(line: &str) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut remaining = line;
+    while !remaining.is_empty() {
+        // Whitespace
+        let ws = remaining.len() - remaining.trim_start().len();
+        if ws > 0 {
+            spans.push(Span::raw(remaining[..ws].to_string()));
+            remaining = &remaining[ws..];
+            continue;
+        }
+        let ch = remaining.chars().next().unwrap();
+        match ch {
+            '"' => {
+                // String: find closing quote
+                let end = remaining[1..].find('"').map(|i| i + 2).unwrap_or(remaining.len());
+                let s = &remaining[..end];
+                // Check if it's a key (followed by ':')
+                let after = remaining[end..].trim_start();
+                let style = if after.starts_with(':') {
+                    Style::default().fg(Color::Cyan) // key
+                } else {
+                    Style::default().fg(Color::Green) // string value
+                };
+                spans.push(Span::styled(s.to_string(), style));
+                remaining = &remaining[end..];
+            }
+            ':' => {
+                spans.push(Span::styled(":".to_string(), Style::default().fg(Color::DarkGray)));
+                remaining = &remaining[1..];
+            }
+            '{' | '}' | '[' | ']' => {
+                spans.push(Span::styled(ch.to_string(), Style::default().fg(Color::Yellow)));
+                remaining = &remaining[ch.len_utf8()..];
+            }
+            't' | 'f' | 'n' => {
+                // true/false/null
+                let word_len = remaining.chars().take_while(|c| c.is_alphabetic()).count();
+                let word = &remaining[..word_len];
+                if word == "true" || word == "false" || word == "null" {
+                    spans.push(Span::styled(word.to_string(), Style::default().fg(Color::Magenta)));
+                } else {
+                    spans.push(Span::raw(word.to_string()));
+                }
+                remaining = &remaining[word_len..];
+            }
+            '0'..='9' | '-' => {
+                // Number
+                let num_len = remaining.chars().take_while(|c| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == 'e' || *c == 'E' || *c == '+').count();
+                spans.push(Span::styled(remaining[..num_len].to_string(), Style::default().fg(Color::Yellow)));
+                remaining = &remaining[num_len..];
+            }
+            _ => {
+                spans.push(Span::raw(ch.to_string()));
+                remaining = &remaining[ch.len_utf8()..];
+            }
         }
     }
     Line::from(spans)
