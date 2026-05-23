@@ -1064,14 +1064,56 @@ fn get_selected_commands(filtered: &[(usize, &ProxyEvent)], app: &App) -> String
         filtered.iter()
             .enumerate()
             .filter(|(idx, _)| *idx >= lo && *idx <= hi)
-            .map(|(_, (_, ev))| ev.full_command.as_str())
+            .map(|(_, (_, ev))| format_copy_text(ev))
             .collect::<Vec<_>>()
             .join("\n")
     } else {
         filtered.get(app.selected)
-            .map(|(_, ev)| ev.full_command.clone())
+            .map(|(_, ev)| format_copy_text(ev))
             .unwrap_or_default()
     }
+}
+
+fn format_copy_text(ev: &ProxyEvent) -> String {
+    if ev.protocol == ocular_protocol::Protocol::Http {
+        http_event_to_curl(ev)
+    } else {
+        ev.full_command.clone()
+    }
+}
+
+fn http_event_to_curl(ev: &ProxyEvent) -> String {
+    let dest = ev.dest.as_deref().unwrap_or("localhost");
+    // full_command format: "METHOD /path\n\n[Request Headers]\n...\n\n[Request Body]\n..."
+    let lines: Vec<&str> = ev.full_command.lines().collect();
+    let first_line = lines.first().copied().unwrap_or("");
+    let mut parts = first_line.splitn(2, ' ');
+    let method = parts.next().unwrap_or("GET");
+    let path = parts.next().unwrap_or("/");
+
+    let url = format!("http://{}{}", dest, path);
+    let mut curl = format!("curl -X {} '{}'", method, url);
+
+    // Extract headers and body from full_command
+    let mut in_headers = false;
+    let mut in_body = false;
+    let mut body = String::new();
+    for line in &lines[1..] {
+        if *line == "[Request Headers]" { in_headers = true; in_body = false; continue; }
+        if *line == "[Request Body]" { in_body = true; in_headers = false; continue; }
+        if line.starts_with('[') && line.ends_with(']') { in_headers = false; in_body = false; continue; }
+        if line.is_empty() { continue; }
+        if in_headers {
+            curl.push_str(&format!(" \\\n  -H '{}'", line));
+        }
+        if in_body {
+            body.push_str(line);
+        }
+    }
+    if !body.is_empty() {
+        curl.push_str(&format!(" \\\n  -d '{}'", body));
+    }
+    curl
 }
 
 fn open_in_editor(text: &str) {
