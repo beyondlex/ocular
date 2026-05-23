@@ -78,3 +78,9 @@ name = "postgres"
 protocol = "postgres"
 listen = "127.0.0.1:15432"   # Your app connects here
 remote = "127.0.0.1:5432"    # Real PostgreSQL address
+
+[[proxy]]
+name = "mongodb"
+protocol = "mongodb"
+listen = "127.0.0.1:17017"   # Your app connects here
+remote = "127.0.0.1:27017"   # Real MongoDB address

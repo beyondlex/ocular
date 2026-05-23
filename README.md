@@ -86,6 +86,12 @@ name = "postgres"
 protocol = "postgres"
 listen = "127.0.0.1:15432"
 remote = "127.0.0.1:5432"
+
+[[proxy]]
+name = "mongodb"
+protocol = "mongodb"
+listen = "127.0.0.1:17017"
+remote = "127.0.0.1:27017"
 ```
 
 Multiple instances of the same protocol are supported — just use different names and ports:
