@@ -724,7 +724,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     let event_items: Vec<ListItem> = filtered.iter().enumerate()
         .skip(visible_start)
         .take(visible_height)
-        .map(|(idx, (_orig_idx, ev))| {
+        .map(|(idx, (orig_idx, ev))| {
             let time = format_time(&ev.timestamp);
             let lat = format_latency(&ev.latency);
             let spans: Vec<Span> = app.event_format.segments.iter().map(|seg| {
@@ -732,7 +732,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                     FormatSegment::Literal(s) => Span::raw(s.clone()),
                     FormatSegment::Field { name, width } => {
                         let (raw, style) = match name.as_str() {
-                            "index" => (format!("{}", idx + 1), theme.line_number),
+                            "index" => (format!("{}", orig_idx + 1), theme.line_number),
                             "time" => (time.clone(), theme.timestamp),
                             "component" => (format!("{}", ev.component), theme.component_style(&ev.component)),
                             "command" => (ev.command.clone(), theme.command),
