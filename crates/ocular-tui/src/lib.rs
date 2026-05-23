@@ -108,6 +108,7 @@ struct App {
     visual_anchor: usize, // start of visual selection
     theme: Theme,
     paused: bool,
+    paused_buffer: Vec<ocular_protocol::ProxyEvent>,
     exclude_matchers: std::collections::HashMap<String, ExcludeMatcher>,
     event_format: EventFormat,
 }
@@ -268,6 +269,7 @@ pub async fn run(
         visual_anchor: 0,
         theme,
         paused: false,
+        paused_buffer: Vec::new(),
         exclude_matchers,
         event_format: fmt,
     };
@@ -292,14 +294,17 @@ pub async fn run(
         }
 
         while let Ok(ev) = rx.try_recv() {
-            if app.paused { continue; }
             if let Some(matcher) = app.exclude_matchers.get(&ev.component) {
                 if matcher.is_excluded(&ev.command) { continue; }
             }
-            app.events.push(ev);
-            if app.focus == Focus::Events && app.filter.is_empty() {
-                let filtered = app.filtered_events();
-                app.selected = filtered.len().saturating_sub(1);
+            if app.paused {
+                app.paused_buffer.push(ev);
+            } else {
+                app.events.push(ev);
+                if app.focus == Focus::Events && app.filter.is_empty() {
+                    let filtered = app.filtered_events();
+                    app.selected = filtered.len().saturating_sub(1);
+                }
             }
         }
 
@@ -349,7 +354,14 @@ pub async fn run(
                         KeyCode::Char('h') => { app.focus = Focus::Components; }
                         KeyCode::Char('l') => { app.focus = Focus::Events; }
                         KeyCode::Char('c') => { app.events.clear(); app.selected = 0; }
-                        KeyCode::Char('p') => { app.paused = !app.paused; }
+                        KeyCode::Char('p') => {
+                            app.paused = !app.paused;
+                            if !app.paused && !app.paused_buffer.is_empty() {
+                                app.events.append(&mut app.paused_buffer);
+                                let filtered = app.filtered_events();
+                                app.selected = filtered.len().saturating_sub(1);
+                            }
+                        }
                         KeyCode::Char(',') => {
                             // Open config in $EDITOR
                             disable_raw_mode()?;
