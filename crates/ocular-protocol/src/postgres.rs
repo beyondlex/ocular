@@ -296,8 +296,9 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
                 }
             }
             b'C' => {
-                let tag = read_cstr(payload);
-                detail.push_str(&format!("{} rows\n{}\n", row_count, tag));
+                if row_count > 0 {
+                    detail.push_str(&format!("{} rows\n", row_count));
+                }
             }
             b'E' => {
                 let msg = parse_error_fields(payload);

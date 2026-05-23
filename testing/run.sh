@@ -12,6 +12,11 @@ start() {
     sleep 1
   done
 
+  echo "Waiting for PostgreSQL to be ready..."
+  until $COMPOSE exec -T postgres psql -U postgres -d testdb -c "SELECT 1" >/dev/null 2>&1; do
+    sleep 1
+  done
+
   if [ "${1:-}" != "--no-client" ]; then
     echo "Starting client containers..."
     $COMPOSE --profile client up -d
