@@ -278,9 +278,7 @@ pub async fn run(
         latency_threshold_ms: None,
     };
 
-    let mut last_mtime = std::fs::metadata(&config_path).ok()
-        .and_then(|m| m.modified().ok())
-        .unwrap_or(SystemTime::UNIX_EPOCH);
+    let mut last_mtime = SystemTime::UNIX_EPOCH;
 
     loop {
         // Hot-reload config on file change
