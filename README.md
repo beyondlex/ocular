@@ -43,6 +43,7 @@ Your App ──→ Ocular Proxy (16379) ──→ Redis (6379)
 | MySQL | ✅ |
 | PostgreSQL | ✅ |
 | RabbitMQ (AMQP) | ✅ |
+| MongoDB | ✅ |
 | Elasticsearch (HTTP) | Planned |
 
 ## Quick Start

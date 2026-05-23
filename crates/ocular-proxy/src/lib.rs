@@ -355,11 +355,11 @@ async fn handle_conn(
                 }
                 // ParameterStatus (S), BackendKeyData (K), etc. are silently skipped
             } else {
-                // Redis: single request/response per read
+                // Redis/MongoDB: single request/response per read
                 if let Some(req) = pending_r.lock().await.take() {
                     let latency = req.instant.elapsed();
                     let response = parse_response(protocol, data).unwrap_or_default();
-                    let response_detail = response.clone();
+                    let response_detail = format_response_detail(protocol, data).unwrap_or_else(|| response.clone());
                     let _ = tx_resp.send(ProxyEvent {
                         timestamp: req.timestamp,
                         component: name_resp.clone(),

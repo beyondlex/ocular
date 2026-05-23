@@ -488,13 +488,18 @@ pub async fn run(
                         app.pending_keys.clear();
                         let filtered = app.filtered_events();
                         if let Some((_, ev)) = filtered.get(app.selected) {
+                            let meta = format!("# Time: {}  Src: {}  Dest: {}  Process: {}  Latency: {}",
+                                format_time(&ev.timestamp),
+                                ev.src.as_deref().unwrap_or("-"),
+                                ev.dest.as_deref().unwrap_or("-"),
+                                ev.process.as_deref().unwrap_or("-"),
+                                format_latency(&ev.latency));
                             let detail_content = if ev.protocol == ocular_protocol::Protocol::Mysql || ev.protocol == ocular_protocol::Protocol::Postgres {
-                                format!("{}\n\n-- Response: {}\n-- Latency: {}\n\n{}",
-                                    ev.full_command, ev.response,
-                                    format_latency(&ev.latency), ev.response_detail)
+                                format!("{}\n\n{}\n\n{}",
+                                    ev.full_command, ev.response_detail, meta)
                             } else {
-                                format!("{}\n\n# Response: {}\n# Latency: {}",
-                                    ev.full_command, ev.response, format_latency(&ev.latency))
+                                format!("{}\n\n{}\n\n{}",
+                                    ev.full_command, ev.response_detail, meta)
                             };
                             disable_raw_mode()?;
                             stdout().execute(LeaveAlternateScreen)?;
