@@ -347,3 +347,27 @@ mod tests {
         assert!(matches!(resp, MysqlResponse::Ok { .. }));
     }
 }
+
+/// Check if a MySQL response buffer is complete (ends with OK/EOF/ERR packet).
+pub fn mysql_response_complete(buf: &[u8]) -> bool {
+    if buf.len() < 5 { return false; }
+    let first_marker = buf[4];
+    match first_marker {
+        0x00 | 0xff => return true,
+        _ => {}
+    }
+    let mut pos = 0;
+    let mut last_marker = 0u8;
+    let mut last_pkt_len = 0usize;
+    while pos + 4 <= buf.len() {
+        let pkt_len = (buf[pos] as usize) | (buf[pos+1] as usize) << 8 | (buf[pos+2] as usize) << 16;
+        let end = pos + 4 + pkt_len;
+        if end > buf.len() { break; }
+        if pkt_len > 0 {
+            last_marker = buf[pos + 4];
+            last_pkt_len = pkt_len;
+        }
+        pos = end;
+    }
+    (last_marker == 0xfe && last_pkt_len < 9) || (last_marker == 0x00 && last_pkt_len < 16 && pos == buf.len())
+}

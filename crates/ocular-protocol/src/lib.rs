@@ -4,10 +4,14 @@ pub mod amqp;
 pub mod postgres;
 pub mod mongodb;
 pub mod http;
+pub mod handler;
+pub mod handlers;
 
 pub use resp::{RespValue, parse_resp};
 pub use mysql::{parse_mysql_request, parse_mysql_response};
 pub use amqp::{parse_amqp_request, parse_amqp_response, format_amqp_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, frame_len as amqp_frame_len};
+pub use handler::ProtocolHandler;
+pub use handlers::*;
 
 use std::time::{Duration, SystemTime};
 
@@ -67,105 +71,32 @@ impl Protocol {
 
 /// Parse request bytes, returning a human-readable summary (truncated)
 pub fn parse_request(protocol: Protocol, buf: &[u8]) -> Option<String> {
-    match protocol {
-        Protocol::Redis => {
-            parse_resp(buf).ok().flatten().map(|(val, _)| val.to_command_string())
-        }
-        Protocol::Mysql => {
-            parse_mysql_request(buf).map(|pkt| pkt.to_summary())
-        }
-        Protocol::Amqp => {
-            parse_amqp_request(buf)
-        }
-        Protocol::Postgres => {
-            postgres::parse_postgres_request(buf)
-        }
-        Protocol::Mongodb => {
-            mongodb::parse_mongo_request(buf)
-        }
-        Protocol::Http => {
-            http::parse_http_request(buf)
-        }
-    }
+    get_handler(protocol).parse_request(buf)
 }
 
 /// Extract the full command/SQL from raw bytes (no truncation)
 pub fn extract_full_command(protocol: Protocol, buf: &[u8]) -> Option<String> {
-    match protocol {
-        Protocol::Redis => {
-            parse_resp(buf).ok().flatten().map(|(val, _)| val.to_command_string())
-        }
-        Protocol::Mysql => {
-            if buf.len() < 5 { return None; }
-            let payload_len = (buf[0] as usize) | (buf[1] as usize) << 8 | (buf[2] as usize) << 16;
-            if buf.len() < 4 + payload_len || payload_len <= 1 { return None; }
-            let cmd = buf[4];
-            if cmd == 0x03 || cmd == 0x16 {
-                let sql = String::from_utf8_lossy(&buf[5..4 + payload_len]);
-                Some(sql.replace(|c: char| c.is_control(), ""))
-            } else {
-                parse_mysql_request(buf).map(|pkt| pkt.to_summary())
-            }
-        }
-        Protocol::Amqp => {
-            parse_amqp_request(buf)
-        }
-        Protocol::Postgres => {
-            postgres::extract_postgres_full_command(buf)
-        }
-        Protocol::Mongodb => {
-            mongodb::extract_mongo_full_command(buf)
-        }
-        Protocol::Http => {
-            http::extract_http_full_command(buf)
-        }
-    }
+    get_handler(protocol).extract_full_command(buf)
 }
 
 /// Parse response bytes, returning a short summary
 pub fn parse_response(protocol: Protocol, buf: &[u8]) -> Option<String> {
-    match protocol {
-        Protocol::Redis => {
-            parse_resp(buf).ok().flatten().map(|(val, _)| val.to_command_string())
-        }
-        Protocol::Mysql => {
-            parse_mysql_response(buf).map(|r| r.to_summary())
-        }
-        Protocol::Amqp => {
-            parse_amqp_response(buf)
-        }
-        Protocol::Postgres => {
-            postgres::parse_postgres_response(buf)
-        }
-        Protocol::Mongodb => {
-            mongodb::parse_mongo_response(buf)
-        }
-        Protocol::Http => {
-            http::parse_http_response(buf)
-        }
-    }
+    get_handler(protocol).parse_response(buf)
 }
 
 /// Parse response bytes into a detailed display string (for detail panel)
 pub fn format_response_detail(protocol: Protocol, buf: &[u8]) -> Option<String> {
+    get_handler(protocol).format_response_detail(buf)
+}
+
+/// Get the protocol handler for a given protocol.
+pub fn get_handler(protocol: Protocol) -> &'static dyn ProtocolHandler {
     match protocol {
-        Protocol::Redis => {
-            parse_resp(buf).ok().flatten().map(|(val, _)| val.to_command_string())
-        }
-        Protocol::Mysql => {
-            parse_mysql_response(buf).map(|r| r.to_display())
-        }
-        Protocol::Amqp => {
-            format_amqp_response_detail(buf)
-        }
-        Protocol::Postgres => {
-            postgres::format_postgres_response_detail(buf)
-        }
-        Protocol::Mongodb => {
-            mongodb::format_mongo_response_detail(buf)
-        }
-        Protocol::Http => {
-            http::format_http_response_detail(buf)
-        }
+        Protocol::Redis => &RedisHandler,
+        Protocol::Mysql => &MysqlHandler,
+        Protocol::Amqp => &AmqpHandler,
+        Protocol::Postgres => &PostgresHandler,
+        Protocol::Mongodb => &MongodbHandler,
+        Protocol::Http => &HttpHandler,
     }
 }
