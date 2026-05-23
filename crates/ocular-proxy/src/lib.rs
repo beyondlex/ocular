@@ -135,6 +135,7 @@ async fn handle_conn(
     let dest_resp = dest;
     let client_to_server = async move {
         let mut buf = [0u8; 65536];
+        let mut http_req_buf: Vec<u8> = Vec::new();
         loop {
             let n = cr.read(&mut buf).await?;
             if n == 0 { break; }
@@ -182,6 +183,20 @@ async fn handle_conn(
                     }
                     pos += flen;
                 }
+            } else if protocol == Protocol::Http {
+                http_req_buf.extend_from_slice(data);
+                if ocular_protocol::http::http_request_complete(&http_req_buf) {
+                    if let Some(command) = parse_request(protocol, &http_req_buf) {
+                        let full_command = extract_full_command(protocol, &http_req_buf).unwrap_or_else(|| command.clone());
+                        *pending_w.lock().await = Some(PendingRequest {
+                            timestamp: SystemTime::now(),
+                            instant: Instant::now(),
+                            command,
+                            full_command,
+                        });
+                    }
+                    http_req_buf.clear();
+                }
             } else if let Some(command) = parse_request(protocol, data) {
                 let full_command = extract_full_command(protocol, data).unwrap_or_else(|| command.clone());
                 debug!(component = %name_req, %command);
@@ -204,6 +219,7 @@ async fn handle_conn(
     let server_to_client = async move {
         let mut buf = [0u8; 65536];
         let mut mysql_buf: Vec<u8> = Vec::new();
+        let mut http_resp_buf: Vec<u8> = Vec::new();
         let mut awaiting_response = false;
         loop {
             let n = sr.read(&mut buf).await?;
@@ -238,6 +254,29 @@ async fn handle_conn(
                         mysql_buf.clear();
                         awaiting_response = false;
                     }
+                }
+            } else if protocol == Protocol::Http {
+                http_resp_buf.extend_from_slice(data);
+                if ocular_protocol::http::http_response_complete(&http_resp_buf) {
+                    if let Some(req) = pending_r.lock().await.take() {
+                        let latency = req.instant.elapsed();
+                        let response = parse_response(protocol, &http_resp_buf).unwrap_or_default();
+                        let response_detail = format_response_detail(protocol, &http_resp_buf).unwrap_or_else(|| response.clone());
+                        let _ = tx_resp.send(ProxyEvent {
+                            timestamp: req.timestamp,
+                            component: name_resp.clone(),
+                            protocol,
+                            command: req.command,
+                            full_command: req.full_command,
+                            response,
+                            response_detail,
+                            latency,
+                            process: process_info.clone(),
+                                    src: Some(src_resp.clone()),
+                                    dest: Some(dest_resp.clone()),
+                        });
+                    }
+                    http_resp_buf.clear();
                 }
             } else if protocol == Protocol::Amqp {
                 // AMQP: loop through all server frames

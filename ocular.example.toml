@@ -84,3 +84,9 @@ name = "mongodb"
 protocol = "mongodb"
 listen = "127.0.0.1:17017"   # Your app connects here
 remote = "127.0.0.1:27017"   # Real MongoDB address
+
+[[proxy]]
+name = "elasticsearch"
+protocol = "http"
+listen = "127.0.0.1:19200"   # Your app connects here
+remote = "127.0.0.1:9200"    # Real Elasticsearch address

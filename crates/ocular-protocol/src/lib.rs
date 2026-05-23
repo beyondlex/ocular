@@ -3,6 +3,7 @@ pub mod mysql;
 pub mod amqp;
 pub mod postgres;
 pub mod mongodb;
+pub mod http;
 
 pub use resp::{RespValue, parse_resp};
 pub use mysql::{parse_mysql_request, parse_mysql_response};
@@ -47,6 +48,7 @@ pub enum Protocol {
     Amqp,
     Postgres,
     Mongodb,
+    Http,
 }
 
 impl Protocol {
@@ -57,6 +59,7 @@ impl Protocol {
             "amqp" | "rabbitmq" => Some(Protocol::Amqp),
             "postgres" | "postgresql" => Some(Protocol::Postgres),
             "mongodb" | "mongo" => Some(Protocol::Mongodb),
+            "http" | "elasticsearch" | "es" => Some(Protocol::Http),
             _ => None,
         }
     }
@@ -79,6 +82,9 @@ pub fn parse_request(protocol: Protocol, buf: &[u8]) -> Option<String> {
         }
         Protocol::Mongodb => {
             mongodb::parse_mongo_request(buf)
+        }
+        Protocol::Http => {
+            http::parse_http_request(buf)
         }
     }
 }
@@ -110,6 +116,9 @@ pub fn extract_full_command(protocol: Protocol, buf: &[u8]) -> Option<String> {
         Protocol::Mongodb => {
             mongodb::extract_mongo_full_command(buf)
         }
+        Protocol::Http => {
+            http::extract_http_full_command(buf)
+        }
     }
 }
 
@@ -131,6 +140,9 @@ pub fn parse_response(protocol: Protocol, buf: &[u8]) -> Option<String> {
         Protocol::Mongodb => {
             mongodb::parse_mongo_response(buf)
         }
+        Protocol::Http => {
+            http::parse_http_response(buf)
+        }
     }
 }
 
@@ -151,6 +163,9 @@ pub fn format_response_detail(protocol: Protocol, buf: &[u8]) -> Option<String> 
         }
         Protocol::Mongodb => {
             mongodb::format_mongo_response_detail(buf)
+        }
+        Protocol::Http => {
+            http::format_http_response_detail(buf)
         }
     }
 }
