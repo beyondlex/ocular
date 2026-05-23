@@ -1,7 +1,7 @@
-/// AMQP 0-9-1 wire protocol parser
-///
-/// Frame format: [type:1][channel:2][size:4][payload...][frame_end:0xCE]
-/// Method frame payload: [class_id:2][method_id:2][arguments...]
+//! AMQP 0-9-1 wire protocol parser
+//!
+//! Frame format: [type:1][channel:2][size:4][payload...][frame_end:0xCE]
+//! Method frame payload: [class_id:2][method_id:2][arguments...]
 
 const FRAME_METHOD: u8 = 1;
 const FRAME_HEADER: u8 = 2;

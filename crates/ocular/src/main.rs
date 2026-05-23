@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
     for proxy_cfg in &config.proxy {
         let tx = tx.clone();
         let cfg = proxy_cfg.clone();
-        let protocol = ocular_protocol::Protocol::from_str(&cfg.protocol)
+        let protocol = ocular_protocol::Protocol::parse(&cfg.protocol)
             .unwrap_or_else(|| {
                 tracing::warn!(protocol = %cfg.protocol, "unknown protocol, defaulting to redis");
                 ocular_protocol::Protocol::Redis
@@ -123,8 +123,8 @@ async fn main() -> Result<()> {
     }
 
     // Event logger
-    let event_log_enabled = config.event_log.as_ref().map_or(false, |c| c.enabled);
-    let include_response = config.event_log.as_ref().map_or(false, |c| c.include_response);
+    let event_log_enabled = config.event_log.as_ref().is_some_and(|c| c.enabled);
+    let include_response = config.event_log.as_ref().is_some_and(|c| c.include_response);
     let log_components: Vec<String> = config.event_log.as_ref().map_or(vec![], |c| c.components.clone());
     if event_log_enabled {
         let event_log_path = config_dir.join("events.log");
@@ -146,21 +146,21 @@ async fn main() -> Result<()> {
                 };
                 if include_response {
                     let response = ev.response.replace('\n', " ");
-                    let _ = writeln!(file, "{} [{}]{} {} ({}) -> {}",
+                    let _ = writeln!(file, "{} [{}]{} {} ({:.2}ms) -> {}",
                         ts.format("%H:%M:%S%.3f"),
                         ev.component,
                         addr,
                         command,
-                        format!("{:.2}ms", ev.latency.as_secs_f64() * 1000.0),
+                        ev.latency.as_secs_f64() * 1000.0,
                         response,
                     );
                 } else {
-                    let _ = writeln!(file, "{} [{}]{} {} ({})",
+                    let _ = writeln!(file, "{} [{}]{} {} ({:.2}ms)",
                         ts.format("%H:%M:%S%.3f"),
                         ev.component,
                         addr,
                         command,
-                        format!("{:.2}ms", ev.latency.as_secs_f64() * 1000.0),
+                        ev.latency.as_secs_f64() * 1000.0,
                     );
                 }
             }

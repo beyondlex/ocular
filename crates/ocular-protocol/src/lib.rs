@@ -56,7 +56,7 @@ pub enum Protocol {
 }
 
 impl Protocol {
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "redis" => Some(Protocol::Redis),
             "mysql" => Some(Protocol::Mysql),

@@ -1,7 +1,7 @@
-/// PostgreSQL wire protocol parser (v3)
-///
-/// Message format: [type:1][length:4 (includes self)][payload...]
-/// Startup message has no type byte: [length:4][protocol_version:4][params...]
+//! PostgreSQL wire protocol parser (v3)
+//!
+//! Message format: [type:1][length:4 (includes self)][payload...]
+//! Startup message has no type byte: [length:4][protocol_version:4][params...]
 
 /// Parse a client→server message, return human-readable summary
 pub fn parse_postgres_request(buf: &[u8]) -> Option<String> {
@@ -144,7 +144,7 @@ pub fn parse_postgres_response(buf: &[u8]) -> Option<String> {
         let payload = &buf[pos+5..pos+1+len];
 
         let parsed = parse_single_response(msg_type, payload);
-        if let Some(ref p) = parsed {
+        if let Some(ref _p) = parsed {
             // Error/CommandComplete take priority
             if msg_type == b'E' || msg_type == b'C' {
                 return parsed;
@@ -254,10 +254,9 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
         let payload = &buf[pos+5..pos+1+len];
 
         match msg_type {
-            b'T' => {
+            b'T' if payload.len() >= 2 => {
                 // RowDescription - extract column names
-                if payload.len() >= 2 {
-                    let col_count = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+                let col_count = u16::from_be_bytes([payload[0], payload[1]]) as usize;
                     let mut p = 2;
                     let mut cols = Vec::new();
                     for _ in 0..col_count {
@@ -266,7 +265,6 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
                         cols.push(name);
                     }
                     detail.push_str(&format!("Columns: {}\n", cols.join(" | ")));
-                }
             }
             b'D' => {
                 row_count += 1;
@@ -295,10 +293,8 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
                     }
                 }
             }
-            b'C' => {
-                if row_count > 0 {
-                    detail.push_str(&format!("{} rows\n", row_count));
-                }
+            b'C' if row_count > 0 => {
+                detail.push_str(&format!("{} rows\n", row_count));
             }
             b'E' => {
                 let msg = parse_error_fields(payload);

@@ -1,7 +1,7 @@
-/// MySQL wire protocol parser (client command packets)
-///
-/// MySQL packet format: [3-byte length][1-byte seq][payload]
-/// Command byte is the first byte of payload.
+//! MySQL wire protocol parser (client command packets)
+//!
+//! MySQL packet format: [3-byte length][1-byte seq][payload]
+//! Command byte is the first byte of payload.
 
 /// Parsed MySQL packet
 #[derive(Debug, Clone)]

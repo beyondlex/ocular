@@ -1,5 +1,5 @@
-/// MongoDB wire protocol parser (OP_MSG only, modern MongoDB 3.6+)
-/// All integers are little-endian.
+//! MongoDB wire protocol parser (OP_MSG only, modern MongoDB 3.6+)
+//! All integers are little-endian.
 
 const OP_MSG: i32 = 2013;
 const OP_COMPRESSED: i32 = 2012;
@@ -9,7 +9,7 @@ const OP_COMPRESSED: i32 = 2012;
 pub fn mongo_msg_len(buf: &[u8]) -> Option<usize> {
     if buf.len() < 4 { return None; }
     let len = i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
-    if len < 16 || len > 48 * 1024 * 1024 { return None; }
+    if !(16..=48 * 1024 * 1024).contains(&len) { return None; }
     Some(len)
 }
 
@@ -335,7 +335,7 @@ fn get_i32_field(doc: &[u8], name: &str) -> Option<i32> {
     None
 }
 
-fn get_raw_doc_field<'a>(doc: &'a [u8], name: &str) -> Option<Vec<u8>> {
+fn get_raw_doc_field(doc: &[u8], name: &str) -> Option<Vec<u8>> {
     let mut pos = 4;
     while pos < doc.len() - 1 {
         let etype = doc[pos];
@@ -403,7 +403,6 @@ fn get_array_len(doc: &[u8], name: &str) -> usize {
         pos += 1;
         let Some(key) = read_cstr(&arr[pos..]) else { break };
         pos += key.len() + 1;
-        match arr[pos - key.len() - 1..pos].first().copied().unwrap_or(0) { _ => {} }
         // skip value based on type
         let etype = arr[pos - key.len() - 2];
         match etype {

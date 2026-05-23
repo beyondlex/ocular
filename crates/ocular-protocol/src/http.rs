@@ -1,5 +1,5 @@
-/// Generic HTTP/1.1 protocol parser for Ocular.
-/// Parses request line, headers, and body. Used for Elasticsearch and other HTTP services.
+//! Generic HTTP/1.1 protocol parser for Ocular.
+//! Parses request line, headers, and body. Used for Elasticsearch and other HTTP services.
 
 /// Parse an HTTP request buffer, returning "METHOD /path" summary.
 pub fn parse_http_request(buf: &[u8]) -> Option<String> {
@@ -131,8 +131,7 @@ fn extract_body_from_http(s: &str) -> String {
 fn decode_chunked(body: &str) -> String {
     let mut result = String::new();
     let mut remaining = body;
-    loop {
-        let Some(line_end) = remaining.find("\r\n") else { break };
+    while let Some(line_end) = remaining.find("\r\n") {
         let size_str = remaining[..line_end].trim();
         let size = usize::from_str_radix(size_str, 16).unwrap_or(0);
         if size == 0 { break; }
@@ -180,18 +179,18 @@ fn simple_json_format(s: &str) -> String {
                 out.push(ch);
                 indent += 2;
                 out.push('\n');
-                out.extend(std::iter::repeat(' ').take(indent));
+                out.extend(std::iter::repeat_n(' ', indent));
             }
             '}' | ']' => {
                 indent = indent.saturating_sub(2);
                 out.push('\n');
-                out.extend(std::iter::repeat(' ').take(indent));
+                out.extend(std::iter::repeat_n(' ', indent));
                 out.push(ch);
             }
             ',' => {
                 out.push(ch);
                 out.push('\n');
-                out.extend(std::iter::repeat(' ').take(indent));
+                out.extend(std::iter::repeat_n(' ', indent));
             }
             ':' => {
                 out.push(':');

@@ -59,11 +59,11 @@ impl ExcludeMatcher {
 
     fn new(excludes: Option<&Vec<ExcludeConfig>>, include: Option<&ExcludeConfig>) -> Self {
         let exclude_matchers = excludes.map(|cfgs| {
-            cfgs.iter().flat_map(|c| Self::compile_patterns(c)).collect()
+            cfgs.iter().flat_map(Self::compile_patterns).collect()
         }).unwrap_or_default();
         Self {
             excludes: exclude_matchers,
-            includes: include.map(|c| Self::compile_patterns(c)).unwrap_or_default(),
+            includes: include.map(Self::compile_patterns).unwrap_or_default(),
         }
     }
 
@@ -511,13 +511,8 @@ pub async fn run(
                                 ev.dest.as_deref().unwrap_or("-"),
                                 ev.process.as_deref().unwrap_or("-"),
                                 format_latency(&ev.latency));
-                            let detail_content = if ev.protocol == ocular_protocol::Protocol::Mysql || ev.protocol == ocular_protocol::Protocol::Postgres {
-                                format!("{}\n\n{}\n\n{}",
-                                    ev.full_command, ev.response_detail, meta)
-                            } else {
-                                format!("{}\n\n{}\n\n{}",
-                                    ev.full_command, ev.response_detail, meta)
-                            };
+                            let detail_content = format!("{}\n\n{}\n\n{}",
+                                ev.full_command, ev.response_detail, meta);
                             disable_raw_mode()?;
                             stdout().execute(LeaveAlternateScreen)?;
                             open_in_editor(&detail_content);
@@ -739,15 +734,15 @@ fn ui(f: &mut Frame, app: &mut App) {
                         let (raw, style) = match name.as_str() {
                             "index" => (format!("{}", orig_idx + 1), theme.line_number),
                             "time" => (time.clone(), theme.timestamp),
-                            "component" => (format!("{}", ev.component), theme.component_style(&ev.component)),
+                            "component" => (ev.component.to_string(), theme.component_style(&ev.component)),
                             "command" => (ev.command.clone(), theme.command),
                             "latency" => {
-                                let style = if app.latency_threshold_ms.map_or(false, |t| ev.latency.as_secs_f64() * 1000.0 > t) {
+                                let style = if app.latency_threshold_ms.is_some_and(|t| ev.latency.as_secs_f64() * 1000.0 > t) {
                                     Style::default().fg(Color::Red)
                                 } else {
                                     theme.latency
                                 };
-                                (format!("{}", lat), style)
+                                (lat.to_string(), style)
                             },
                             "process" => (ev.process.clone().unwrap_or_default(), theme.latency),
                             "src" => (ev.src.clone().unwrap_or_default(), Style::default().fg(Color::Blue)),
@@ -907,7 +902,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Clamp scroll
     let detail_view_width = right[1].width.saturating_sub(2).max(1) as usize;
     let wrapped_lines: u16 = detail_str_for_scroll.lines()
-        .map(|l| ((l.chars().count().max(1) + detail_view_width - 1) / detail_view_width) as u16)
+        .map(|l| l.chars().count().max(1).div_ceil(detail_view_width) as u16)
         .sum();
     let max_scroll = wrapped_lines.saturating_sub(1);
     app.detail_scroll = app.detail_scroll.min(max_scroll);

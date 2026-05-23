@@ -44,6 +44,7 @@ pub async fn run_proxy(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_conn(
     mut client: TcpStream,
     remote_addr: &str,
@@ -476,7 +477,7 @@ fn mysql_response_complete(buf: &[u8]) -> bool {
     (last_marker == 0xfe && last_pkt_len < 9) || (last_marker == 0x00 && last_pkt_len < 16 && pos == buf.len())
 }
 
-fn strip_mysql_ssl_flag(packet: &mut Vec<u8>) {
+fn strip_mysql_ssl_flag(packet: &mut [u8]) {
     if packet.len() < 5 { return; }
     let payload = &mut packet[4..];
     if payload.is_empty() || payload[0] != 10 { return; }
