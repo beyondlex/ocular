@@ -318,8 +318,8 @@ async fn handle_conn(
                                 response_detail,
                                 latency: std::time::Duration::ZERO,
                                 process: process_info.clone(),
-                                    src: Some(src_resp.clone()),
-                                    dest: Some(dest_resp.clone()),
+                                    src: Some(dest_resp.clone()),
+                                    dest: Some(src_resp.clone()),
                             });
                         }
                     }

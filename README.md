@@ -203,6 +203,8 @@ event_format = "%{5}index %time [%{-12}component] %command (%latency)"
 | `component` | Component name |
 | `command` | Event command/SQL |
 | `latency` | Request→response duration |
+| `src` | Source address (ip:port) |
+| `dest` | Destination address (ip:port) |
 | `process` | Client process info |
 
 ### Examples
