@@ -51,13 +51,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish -p ocular-protocol --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: cargo publish -p ocular-protocol || true
       - run: sleep 30
-      - run: cargo publish -p ocular-proxy --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: cargo publish -p ocular-proxy || true
       - run: sleep 30
-      - run: cargo publish -p ocular-tui --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: cargo publish -p ocular-tui || true
       - run: sleep 30
-      - run: cargo publish -p ocular-cli --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      - run: cargo publish -p ocular-cli || true
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
   update-homebrew:
     needs: release
