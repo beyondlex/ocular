@@ -142,7 +142,7 @@ fn extract_readable_payload(buf: &[u8]) -> Option<String> {
             }
 
             // Keep the longest string as fallback
-            if best.map_or(true, |b| candidate.len() > b.len()) {
+            if best.is_none_or(|b| candidate.len() > b.len()) {
                 best = Some(candidate);
             }
         } else {
@@ -171,7 +171,7 @@ fn extract_produce_records(buf: &[u8]) -> Option<Vec<String>> {
 
         // Validate batchLength (at offset +8, 4 bytes)
         let batch_len = i32::from_be_bytes([buf[pos + 8], buf[pos + 9], buf[pos + 10], buf[pos + 11]]);
-        if batch_len < 49 || batch_len > 10_000_000 { continue; }
+        if !(49..=10_000_000).contains(&batch_len) { continue; }
         let batch_len = batch_len as usize;
         if pos + 12 + batch_len > buf.len() { continue; }
 
@@ -186,7 +186,7 @@ fn extract_produce_records(buf: &[u8]) -> Option<Vec<String>> {
 
         // recordCount at offset +45 from batch start
         let record_count = i32::from_be_bytes([buf[pos + 53], buf[pos + 54], buf[pos + 55], buf[pos + 56]]);
-        if record_count < 0 || record_count > 100_000 { continue; }
+        if !(0..=100_000).contains(&record_count) { continue; }
 
         if compression != 0 {
             results.push(format!("({} record(s), compressed)", record_count));

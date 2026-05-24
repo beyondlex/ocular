@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.6.0 (2026-05-24)
+
+### New Features
+- **Memcached protocol support** — parse GET/SET/INCR/DELETE/TOUCH/STATS, request/response buffering
+- **Kafka protocol support** — parse 30+ ApiKeys (Produce, Fetch, Metadata, JoinGroup, etc.), extract message body from Produce requests
+- **Demo mode** (`--demo`) — generates simulated traffic for all protocols, no services needed
+- **Follow mode** (`Space f`) — toggle auto-scroll (tail -f), `G` enables, `k`/`gg` disables; FOLLOW indicator in status bar
+
+### Distribution
+- **Homebrew** — `brew tap beyondlex/tap && brew install ocular`
+- **Cargo** — `cargo install ocular-cli`
+- **CI auto-publish** — release workflow publishes to crates.io and updates Homebrew tap automatically
+
+### Improvements
+- Install script defaults to `~/.local/bin` (no sudo needed), supports `OCULAR_INSTALL_DIR` env var
+- Cleaner `ocular.example.toml` with all config options documented
+- README rewrite: origin story, vim-native UX emphasis, 3-line quick start
+
 ## v0.5.0 (2026-05-24)
 
 ### New Features

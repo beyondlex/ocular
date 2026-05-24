@@ -23,6 +23,6 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 dirs = "5"
 chrono.workspace = true
-ocular-proxy = { path = "../ocular-proxy", version = "0.5.0" }
-ocular-tui = { path = "../ocular-tui", version = "0.5.0" }
-ocular-protocol = { path = "../ocular-protocol", version = "0.5.0" }
+ocular-proxy = { path = "../ocular-proxy", version = "0.6.0" }
+ocular-tui = { path = "../ocular-tui", version = "0.6.0" }
+ocular-protocol = { path = "../ocular-protocol", version = "0.6.0" }
