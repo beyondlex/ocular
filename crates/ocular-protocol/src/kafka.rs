@@ -97,70 +97,118 @@ pub fn extract_kafka_full_command(buf: &[u8]) -> Option<String> {
         return Some(summary);
     }
 
-    // Try to extract record values from the Produce request
+    // Try structured parsing first, fall back to string extraction
     if let Some(records) = extract_produce_records(buf) {
-        if records.is_empty() {
-            return Some(summary);
+        if !records.is_empty() {
+            return Some(format!("{}\n{}", summary, records.join("\n")));
         }
-        let body = records.join("\n");
-        Some(format!("{}\n{}", summary, body))
-    } else {
-        Some(summary)
     }
+
+    // Fallback: find readable strings that look like message content
+    if let Some(body) = extract_readable_payload(buf) {
+        return Some(format!("{}\n{}", summary, body));
+    }
+
+    Some(summary)
 }
 
-/// Try to extract record values from a Produce request
-/// RecordBatch format: baseOffset(8) + batchLength(4) + ... + magic(1) + compression(2) + ...
-fn extract_produce_records(buf: &[u8]) -> Option<Vec<String>> {
-    // Scan for RecordBatch magic byte (0x02 = current format)
-    // RecordBatch starts with: baseOffset(8) + batchLength(4) + partitionLeaderEpoch(4) + magic(1)
-    let mut results = Vec::new();
-    let mut pos = 12; // skip request header minimum
+/// Find readable UTF-8 strings in the payload that look like message content
+fn extract_readable_payload(buf: &[u8]) -> Option<String> {
+    // Skip the first ~40 bytes (header + topic metadata)
+    // Look for JSON-like or substantial text content
+    let search_start = 40.min(buf.len());
+    let mut best: Option<&[u8]> = None;
 
-    // Scan for the RecordBatch signature: look for magic byte 2 at offset +16 from a batch start
-    while pos + 61 < buf.len() {
-        // Check if this looks like a RecordBatch (magic byte at offset +16)
-        if buf[pos + 16] == 0x02 {
-            let batch_len = i32::from_be_bytes([buf[pos + 8], buf[pos + 9], buf[pos + 10], buf[pos + 11]]) as usize;
-            if batch_len < 49 || pos + 12 + batch_len > buf.len() {
-                pos += 1;
-                continue;
+    let mut i = search_start;
+    while i < buf.len() {
+        // Find start of a printable sequence
+        if buf[i] >= 0x20 && buf[i] < 0x7F {
+            let start = i;
+            while i < buf.len() && buf[i] >= 0x20 && buf[i] < 0x7F {
+                i += 1;
             }
-
-            // attributes at offset +17 (2 bytes), compression = attributes & 0x07
-            let attributes = i16::from_be_bytes([buf[pos + 17], buf[pos + 18]]);
-            let compression = attributes & 0x07;
-
-            if compression != 0 {
-                let record_count = i32::from_be_bytes([buf[pos + 29], buf[pos + 30], buf[pos + 31], buf[pos + 32]]);
-                results.push(format!("({} record(s), compressed)", record_count));
-                pos += 12 + batch_len;
-                continue;
-            }
-
-            // Uncompressed: records start at offset +49 from batch start
-            let records_start = pos + 49;
-            let records_end = pos + 12 + batch_len;
-            let mut rpos = records_start;
-
-            while rpos < records_end {
-                if let Some((value, consumed)) = parse_record(buf, rpos, records_end) {
-                    if let Some(v) = value {
-                        results.push(v);
-                    }
-                    rpos += consumed;
-                } else {
-                    break;
+            let len = i - start;
+            // Only consider strings of reasonable length that aren't just topic/client names
+            if len >= 10 {
+                let candidate = &buf[start..i];
+                // Prefer JSON-looking content
+                if candidate.starts_with(b"{") || candidate.starts_with(b"[") {
+                    return Some(String::from_utf8_lossy(candidate).to_string());
+                }
+                // Keep the longest string as fallback
+                if best.map_or(true, |b| candidate.len() > b.len()) {
+                    best = Some(candidate);
                 }
             }
-
-            pos += 12 + batch_len;
         } else {
-            pos += 1;
+            i += 1;
         }
     }
 
-    if results.is_empty() { None } else { Some(results) }
+    best.map(|b| String::from_utf8_lossy(b).to_string())
+}
+
+/// Extract record values from a Produce request by finding the RecordBatch
+/// RecordBatch layout (after the batch starts):
+///   baseOffset(8) + batchLength(4) + partitionLeaderEpoch(4) + magic(1=0x02)
+///   + crc(4) + attributes(2) + lastOffsetDelta(4) + baseTimestamp(8)
+///   + maxTimestamp(8) + producerId(8) + producerEpoch(2) + baseSequence(4)
+///   + recordCount(4) + [records...]
+fn extract_produce_records(buf: &[u8]) -> Option<Vec<String>> {
+    // Find magic byte 0x02 at the correct position within a RecordBatch
+    // The magic byte is at offset 16 from the start of a RecordBatch
+    // Validate by checking batchLength makes sense
+    let mut results = Vec::new();
+
+    for pos in 12..buf.len().saturating_sub(61) {
+        // magic byte check at offset +16
+        if buf[pos + 16] != 0x02 { continue; }
+
+        // Validate batchLength (at offset +8, 4 bytes)
+        let batch_len = i32::from_be_bytes([buf[pos + 8], buf[pos + 9], buf[pos + 10], buf[pos + 11]]);
+        if batch_len < 49 || batch_len > 10_000_000 { continue; }
+        let batch_len = batch_len as usize;
+        if pos + 12 + batch_len > buf.len() { continue; }
+
+        // Validate baseOffset should be 0 for producer requests
+        let base_offset = i64::from_be_bytes([buf[pos], buf[pos+1], buf[pos+2], buf[pos+3], buf[pos+4], buf[pos+5], buf[pos+6], buf[pos+7]]);
+        if base_offset != 0 { continue; }
+
+        // attributes at offset +21 from batch start (after magic + crc)
+        // Actually: baseOffset(8) + batchLength(4) + partitionLeaderEpoch(4) + magic(1) + crc(4) = 21
+        let attributes = i16::from_be_bytes([buf[pos + 21], buf[pos + 22]]);
+        let compression = attributes & 0x07;
+
+        // recordCount at offset +45 from batch start
+        let record_count = i32::from_be_bytes([buf[pos + 53], buf[pos + 54], buf[pos + 55], buf[pos + 56]]);
+        if record_count < 0 || record_count > 100_000 { continue; }
+
+        if compression != 0 {
+            results.push(format!("({} record(s), compressed)", record_count));
+            return Some(results);
+        }
+
+        // Records start at offset +57 from batch start
+        let records_start = pos + 57;
+        let records_end = pos + 12 + batch_len;
+        let mut rpos = records_start;
+
+        for _ in 0..record_count {
+            if rpos >= records_end { break; }
+            if let Some((value, consumed)) = parse_record(buf, rpos, records_end) {
+                if let Some(v) = value {
+                    results.push(v);
+                }
+                rpos += consumed;
+            } else {
+                break;
+            }
+        }
+
+        return if results.is_empty() { None } else { Some(results) };
+    }
+
+    None
 }
 
 /// Parse a single Record from a RecordBatch (uncompressed)
