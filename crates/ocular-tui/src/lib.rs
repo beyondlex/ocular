@@ -111,6 +111,7 @@ struct App {
     theme: Theme,
     paused: bool,
     paused_buffer: Vec<ocular_protocol::ProxyEvent>,
+    follow: bool,
     exclude_matchers: std::collections::HashMap<String, ExcludeMatcher>,
     event_format: EventFormat,
     latency_threshold_ms: Option<f64>,
@@ -289,6 +290,7 @@ pub async fn run(
         theme,
         paused: false,
         paused_buffer: Vec::new(),
+        follow: true,
         exclude_matchers,
         event_format: fmt,
         latency_threshold_ms: None,
@@ -320,7 +322,7 @@ pub async fn run(
                 app.paused_buffer.push(ev);
             } else {
                 app.events.push(ev);
-                if app.focus == Focus::Events && app.filter.is_empty() {
+                if app.follow && app.focus == Focus::Events && app.filter.is_empty() {
                     let filtered = app.filtered_events();
                     app.selected = filtered.len().saturating_sub(1);
                 }
@@ -373,6 +375,7 @@ pub async fn run(
                         KeyCode::Char('h') => { app.focus = Focus::Components; }
                         KeyCode::Char('l') => { app.focus = Focus::Events; }
                         KeyCode::Char('c') => { app.events.clear(); app.selected = 0; }
+                        KeyCode::Char('f') => { app.follow = !app.follow; }
                         KeyCode::Char('p') => {
                             app.paused = !app.paused;
                             if !app.paused && !app.paused_buffer.is_empty() {
@@ -455,6 +458,7 @@ pub async fn run(
                         let max = app.filtered_events().len().saturating_sub(1);
                         app.selected = max;
                         app.detail_scroll = 0;
+                        app.follow = true;
                     }
                     KeyCode::Char('G') if app.focus == Focus::Detail => {
                         app.pending_keys.clear();
@@ -471,6 +475,7 @@ pub async fn run(
                             }
                             app.pending_keys.clear();
                             app.detail_scroll = 0;
+                            app.follow = false;
                         } else {
                             app.pending_keys.push('g');
                         }
@@ -549,7 +554,7 @@ pub async fn run(
                                 };
                                 app.selected = 0;
                             }
-                            Focus::Events => { app.selected = app.selected.saturating_sub(1); app.detail_scroll = 0; }
+                            Focus::Events => { app.selected = app.selected.saturating_sub(1); app.detail_scroll = 0; app.follow = false; }
                             Focus::Detail => { app.detail_scroll = app.detail_scroll.saturating_sub(1); }
                             _ => {}
                         }
@@ -978,6 +983,11 @@ fn ui(f: &mut Frame, app: &mut App) {
         } else {
             Span::styled(" NORMAL ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
         };
+        let follow_span = if app.follow {
+            Span::styled(" FOLLOW ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        } else {
+            Span::raw("")
+        };
         let left_line = Line::from(vec![
             Span::raw(" "),
             Span::styled("Tab", key_style), Span::raw(" cycle "),
@@ -990,7 +1000,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Span::styled("│", sep), Span::raw(" "),
             Span::styled("q", key_style), Span::raw(" quit"),
         ]);
-        let right_line = Line::from(vec![mode_span]);
+        let right_line = Line::from(vec![follow_span, mode_span]);
         (left_line, right_line)
     };
     let status_block = Block::default().borders(Borders::TOP | Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray));
@@ -1013,6 +1023,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from(vec![Span::styled(" k", Style::default().fg(Color::Cyan)), Span::raw("  → Above panel")]),
             Line::from(vec![Span::styled(" l", Style::default().fg(Color::Cyan)), Span::raw("  → Right panel")]),
             Line::from(vec![Span::styled(" c", Style::default().fg(Color::Cyan)), Span::raw("  → Clear all events")]),
+            Line::from(vec![Span::styled(" f", Style::default().fg(Color::Cyan)), Span::raw("  → Toggle follow (tail -f)")]),
             Line::from(vec![Span::styled(" p", Style::default().fg(Color::Cyan)), Span::raw("  → Pause/resume stream")]),
             Line::from(vec![Span::styled(" ,", Style::default().fg(Color::Cyan)), Span::raw("  → Edit config")]),
             Line::from(""),

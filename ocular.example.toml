@@ -1,32 +1,33 @@
 # Ocular configuration
+# Docs: https://github.com/beyondlex/ocular
+
+# ─── Display ────────────────────────────────────────────────────────────────
 
 # Theme: "default", "tokyo-night-storm", "dracula", "solarized-light", "solarized-dark"
 theme = "tokyo-night-storm"
-# theme = "dracula"
 
-event_format = "%{5}index %time %{-8}component %latency %command "
+# Event line format (supports hot-reload)
+# Fields: index, time, component, command, latency, src, dest
+# %{N}field = fixed width (positive=right-align, negative=left-align)
+event_format = "%{5}index %time %{-8}component %latency %command"
 
-# Optional: override individual theme elements
-# [theme_overrides]
-# timestamp = { fg = "#888888" }
-# component_redis = { fg = "#ff5050", bold = true }
-# component_mysql = { fg = "#5080ff", bold = true }
-# component_rabbitmq = { fg = "#ff8c00", bold = true }
-# command = { fg = "#ffffff" }
-# selected = { fg = "#ffffff", bg = "#333355" }
+# Highlight events slower than this threshold (ms) in red
+# latency_threshold_ms = 5.0
+
+# Use fuzzy matching for `/` filter (false = exact substring match)
+# fuzzy_filter = true
+
+# Show leader menu popup when pressing Space (false = still works, just no popup)
+# leader_menu = false
+
+# Ask for confirmation before quitting with `q`
+# quit_confirm = false
 
 # ─── Global Exclude (by protocol) ───────────────────────────────────────────
-# Applied to all proxies of the given protocol.
-# Per-proxy [proxy.exclude] is merged with (not replaces) the global rules.
+# Hide noisy events. Per-proxy [proxy.exclude] merges with these.
 
 [exclude.redis]
 patterns = ["PING", "INFO"]
-# case_sensitive = false   # default
-# regex = false            # default
-
-[exclude.rabbitmq]
-patterns = ["Heartbeat"]
-case_sensitive = true
 
 [exclude.mysql]
 patterns = ["SELECT 1"]
@@ -34,66 +35,75 @@ patterns = ["SELECT 1"]
 [exclude.postgres]
 patterns = ["SET ", "DEALLOCATE"]
 
+[exclude.rabbitmq]
+patterns = ["Heartbeat"]
+
 # ─── Proxies ────────────────────────────────────────────────────────────────
+# Uncomment the services you need. Your app connects to `listen`, Ocular
+# forwards to `remote` transparently.
 
 [[proxy]]
 name = "redis"
 protocol = "redis"
-listen = "127.0.0.1:16379"   # Your app connects here
-remote = "127.0.0.1:6379"    # Real Redis address
+listen = "127.0.0.1:16379"
+remote = "127.0.0.1:6379"
 
 [[proxy]]
-name = "redis-debug"
-protocol = "redis"
-listen = "127.0.0.1:16380"
-remote = "127.0.0.1:6380"
-# Include overrides exclude — force-show PING even though global excludes it
-[proxy.include]
-patterns = ["PING"]
-
-[[proxy]]
-name = "mysql-local"
+name = "mysql"
 protocol = "mysql"
-listen = "127.0.0.1:13306"   # Your app connects here
-remote = "127.0.0.1:3306"    # Real MySQL address
+listen = "127.0.0.1:13306"
+remote = "127.0.0.1:3306"
 
-[[proxy]]
-name = "mysql-dev"
-protocol = "mysql"
-listen = "127.0.0.1:13307"
-remote = "dev_host:3306"
-# Per-proxy exclude (merged with global [exclude.mysql])
-[proxy.exclude]
-patterns = ["^SET NAMES", "^SET character_set"]
-regex = true
+# [[proxy]]
+# name = "postgres"
+# protocol = "postgres"
+# listen = "127.0.0.1:15432"
+# remote = "127.0.0.1:5432"
 
-[[proxy]]
-name = "rabbitmq"
-protocol = "rabbitmq"
-listen = "127.0.0.1:15672"   # Your app connects here
-remote = "127.0.0.1:5672"    # Real RabbitMQ address
+# [[proxy]]
+# name = "mongodb"
+# protocol = "mongodb"
+# listen = "127.0.0.1:17017"
+# remote = "127.0.0.1:27017"
 
-[[proxy]]
-name = "postgres"
-protocol = "postgres"
-listen = "127.0.0.1:15432"   # Your app connects here
-remote = "127.0.0.1:5432"    # Real PostgreSQL address
+# [[proxy]]
+# name = "rabbitmq"
+# protocol = "rabbitmq"
+# listen = "127.0.0.1:15672"
+# remote = "127.0.0.1:5672"
 
-[[proxy]]
-name = "mongodb"
-protocol = "mongodb"
-listen = "127.0.0.1:17017"   # Your app connects here
-remote = "127.0.0.1:27017"   # Real MongoDB address
+# [[proxy]]
+# name = "memcached"
+# protocol = "memcached"
+# listen = "127.0.0.1:11212"
+# remote = "127.0.0.1:11211"
 
-[[proxy]]
-name = "elasticsearch"
-protocol = "http"
-listen = "127.0.0.1:19200"   # Your app connects here
-remote = "127.0.0.1:9200"    # Real Elasticsearch address
+# [[proxy]]
+# name = "elasticsearch"
+# protocol = "http"
+# listen = "127.0.0.1:19200"
+# remote = "127.0.0.1:9200"
 
+# ─── Advanced ───────────────────────────────────────────────────────────────
 
-[[proxy]]
-name = "api-prod"
-protocol = "http"
-listen = "127.0.0.1:18443"          # 应用连这里 (HTTP 明文)
-remote = "https://localhost:8443"    # Ocular 用 TLS 连目标
+# Per-proxy exclude (merged with global)
+# [[proxy]]
+# name = "mysql-dev"
+# protocol = "mysql"
+# listen = "127.0.0.1:13307"
+# remote = "dev_host:3306"
+# [proxy.exclude]
+# patterns = ["^SET NAMES"]
+# regex = true
+
+# Include overrides exclude
+# [proxy.include]
+# patterns = ["PING"]
+
+# Record events to file for offline analysis
+# [event_log]
+# enabled = true
+# # Append response after the command in log output
+# include_response = true
+# # Only log events from these components (empty = all)
+# components = ["mongodb"]

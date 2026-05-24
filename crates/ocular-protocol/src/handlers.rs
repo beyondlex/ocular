@@ -109,6 +109,7 @@ impl ProtocolHandler for MongodbHandler {
 
 pub struct HttpHandler;
 
+
 impl ProtocolHandler for HttpHandler {
     fn parse_request(&self, buf: &[u8]) -> Option<String> {
         crate::http::parse_http_request(buf)
@@ -153,5 +154,29 @@ impl ProtocolHandler for HttpHandler {
     }
     fn response_complete(&self, buf: &[u8]) -> bool {
         crate::http::http_response_complete(buf)
+    }
+}
+
+// ─── Memcached ──────────────────────────────────────────────────────────────
+
+pub struct MemcachedHandler;
+
+impl ProtocolHandler for MemcachedHandler {
+    fn parse_request(&self, buf: &[u8]) -> Option<String> {
+        crate::memcached::parse_memcached_request(buf)
+    }
+    fn parse_response(&self, buf: &[u8]) -> Option<String> {
+        crate::memcached::parse_memcached_response(buf)
+    }
+    fn format_response_detail(&self, buf: &[u8]) -> Option<String> {
+        crate::memcached::format_memcached_response_detail(buf)
+    }
+    fn needs_request_buffering(&self) -> bool { true }
+    fn needs_response_buffering(&self) -> bool { true }
+    fn request_complete(&self, buf: &[u8]) -> bool {
+        crate::memcached::memcached_request_complete(buf)
+    }
+    fn response_complete(&self, buf: &[u8]) -> bool {
+        crate::memcached::memcached_response_complete(buf)
     }
 }

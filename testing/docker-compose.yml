@@ -152,6 +152,26 @@ services:
       - ./nginx-https.conf:/etc/nginx/conf.d/default.conf:ro
     command: sh -c "apk add --no-cache openssl && mkdir -p /etc/nginx/certs && openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout /etc/nginx/certs/key.pem -out /etc/nginx/certs/cert.pem -subj '/CN=localhost' 2>/dev/null && nginx -g 'daemon off;'"
 
+  memcached:
+    image: memcached:1-alpine
+    ports:
+      - "11211:11211"
+
+  memcached-client:
+    image: alpine:latest
+    depends_on:
+      - memcached
+    volumes:
+      - ./memcached_crud.sh:/crud.sh:ro
+    entrypoint: ["sh", "/crud.sh"]
+    environment:
+      - MEMCACHED_HOST=host.docker.internal
+      - MEMCACHED_PORT=11212
+      - INTERVAL=1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles: ["client"]
+
   https-client:
     image: curlimages/curl:latest
     depends_on:

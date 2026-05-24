@@ -28,6 +28,9 @@ const EVENTS: &[DemoEvent] = &[
     DemoEvent { component: "elasticsearch", protocol: Protocol::Http, command: "PUT /products/_doc/42 {\"title\":\"Wireless Headphones\",\"price\":49.99,\"stock\":98}", response: "200 OK", latency_ms: 8.67 },
     DemoEvent { component: "redis", protocol: Protocol::Redis, command: "INCR stats:page_views:2026-05-24", response: "(integer) 4832", latency_ms: 0.19 },
     DemoEvent { component: "redis", protocol: Protocol::Redis, command: "ZADD leaderboard 9500 user:1001", response: "(integer) 0", latency_ms: 0.33 },
+    DemoEvent { component: "memcached", protocol: Protocol::Memcached, command: "SET session:abc \"token_xyz_expire_3600\"", response: "STORED", latency_ms: 0.28 },
+    DemoEvent { component: "memcached", protocol: Protocol::Memcached, command: "GET session:abc", response: "VALUE session:abc (24 bytes)", latency_ms: 0.22 },
+    DemoEvent { component: "memcached", protocol: Protocol::Memcached, command: "INCR rate_limit:user:1001 1", response: "47", latency_ms: 0.18 },
     DemoEvent { component: "mysql", protocol: Protocol::Mysql, command: "SELECT COUNT(*) as total FROM orders WHERE created_at >= CURDATE()", response: "ResultSet (1 row, 1 col)", latency_ms: 1.54 },
 ];
 
@@ -54,7 +57,7 @@ pub async fn run_demo(tx: broadcast::Sender<ProxyEvent>) {
 }
 
 pub fn demo_components() -> Vec<ocular_tui::ComponentInfo> {
-    ["redis", "mysql", "postgres", "rabbitmq", "mongodb", "elasticsearch"]
+    ["redis", "mysql", "postgres", "rabbitmq", "mongodb", "elasticsearch", "memcached"]
         .iter()
         .map(|name| ocular_tui::ComponentInfo {
             name: name.to_string(),

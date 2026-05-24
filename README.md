@@ -22,6 +22,14 @@ A TUI tool for real-time visualization of middleware traffic. Vim-style keybindi
 
 **Use cases:** Debug N+1 queries, verify cache hits, trace message routing, profile slow queries, audit what your ORM actually sends.
 
+## Origin Story
+
+I inherited a legacy codebase with no tests and needed to refactor it. The problem: clicking a single button on the frontend could trigger requests to Redis, MySQL, RabbitMQ, and who knows what else — but tracing that through layers of spaghetti code was a nightmare.
+
+I didn't want to spend hours reading tangled code just to understand "what actually happens when I click this button?" I wanted to **see** it — which services get hit, what data flows where, how long each call takes.
+
+So I built Ocular. Point your app's connections through it, click the button, and instantly see every query, every cache write, every message published. No code changes, no breakpoints, no guessing.
+
 ## Quick Start
 
 ```bash
@@ -101,6 +109,7 @@ Ocular runs lightweight TCP proxies between your application and middleware. Tra
 | PostgreSQL | ✅ |
 | RabbitMQ (AMQP) | ✅ |
 | MongoDB | ✅ |
+| Memcached | ✅ |
 | HTTP / Elasticsearch | ✅ |
 
 ## Keybindings
