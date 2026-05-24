@@ -65,6 +65,7 @@ pub fn parse_kafka_request(buf: &[u8]) -> Option<String> {
         18 => Some(format!("ApiVersions v{}", api_version)),
         19 => extract_topic_after_client_id(buf).map(|t| format!("CreateTopics v{} topic={}", api_version, t)),
         20 => extract_topic_after_client_id(buf).map(|t| format!("DeleteTopics v{} topic={}", api_version, t)),
+        _ if name == "Unknown" => Some(format!("ApiKey({}) v{}", api_key, api_version)),
         _ => None,
     };
 
@@ -127,18 +128,21 @@ fn extract_readable_payload(buf: &[u8]) -> Option<String> {
             while i < buf.len() && buf[i] >= 0x20 && buf[i] < 0x7F {
                 i += 1;
             }
-            let len = i - start;
-            // Only consider strings of reasonable length that aren't just topic/client names
-            if len >= 10 {
-                let candidate = &buf[start..i];
-                // Prefer JSON-looking content
-                if candidate.starts_with(b"{") || candidate.starts_with(b"[") {
-                    return Some(String::from_utf8_lossy(candidate).to_string());
+            let candidate = &buf[start..i];
+            let len = candidate.len();
+            if len < 10 { continue; }
+
+            // Look for JSON start within the candidate
+            if let Some(json_offset) = candidate.iter().position(|&b| b == b'{' || b == b'[') {
+                let json_slice = &candidate[json_offset..];
+                if json_slice.len() >= 5 {
+                    return Some(String::from_utf8_lossy(json_slice).to_string());
                 }
-                // Keep the longest string as fallback
-                if best.map_or(true, |b| candidate.len() > b.len()) {
-                    best = Some(candidate);
-                }
+            }
+
+            // Keep the longest string as fallback
+            if best.map_or(true, |b| candidate.len() > b.len()) {
+                best = Some(candidate);
             }
         } else {
             i += 1;
