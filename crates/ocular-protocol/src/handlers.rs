@@ -189,6 +189,9 @@ impl ProtocolHandler for KafkaHandler {
     fn parse_request(&self, buf: &[u8]) -> Option<String> {
         crate::kafka::parse_kafka_request(buf)
     }
+    fn extract_full_command(&self, buf: &[u8]) -> Option<String> {
+        crate::kafka::extract_kafka_full_command(buf)
+    }
     fn parse_response(&self, buf: &[u8]) -> Option<String> {
         crate::kafka::parse_kafka_response(buf)
     }

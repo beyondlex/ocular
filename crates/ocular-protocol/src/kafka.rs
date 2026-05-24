@@ -86,6 +86,149 @@ pub fn format_kafka_response_detail(buf: &[u8]) -> Option<String> {
     parse_kafka_response(buf)
 }
 
+/// Extract full command with body for Produce requests
+pub fn extract_kafka_full_command(buf: &[u8]) -> Option<String> {
+    if buf.len() < 12 { return None; }
+    let api_key = i16::from_be_bytes([buf[4], buf[5]]);
+    let summary = parse_kafka_request(buf)?;
+
+    // Only extract body for Produce (api_key=0)
+    if api_key != 0 {
+        return Some(summary);
+    }
+
+    // Try to extract record values from the Produce request
+    if let Some(records) = extract_produce_records(buf) {
+        if records.is_empty() {
+            return Some(summary);
+        }
+        let body = records.join("\n");
+        Some(format!("{}\n{}", summary, body))
+    } else {
+        Some(summary)
+    }
+}
+
+/// Try to extract record values from a Produce request
+/// RecordBatch format: baseOffset(8) + batchLength(4) + ... + magic(1) + compression(2) + ...
+fn extract_produce_records(buf: &[u8]) -> Option<Vec<String>> {
+    // Scan for RecordBatch magic byte (0x02 = current format)
+    // RecordBatch starts with: baseOffset(8) + batchLength(4) + partitionLeaderEpoch(4) + magic(1)
+    let mut results = Vec::new();
+    let mut pos = 12; // skip request header minimum
+
+    // Scan for the RecordBatch signature: look for magic byte 2 at offset +16 from a batch start
+    while pos + 61 < buf.len() {
+        // Check if this looks like a RecordBatch (magic byte at offset +16)
+        if buf[pos + 16] == 0x02 {
+            let batch_len = i32::from_be_bytes([buf[pos + 8], buf[pos + 9], buf[pos + 10], buf[pos + 11]]) as usize;
+            if batch_len < 49 || pos + 12 + batch_len > buf.len() {
+                pos += 1;
+                continue;
+            }
+
+            // attributes at offset +17 (2 bytes), compression = attributes & 0x07
+            let attributes = i16::from_be_bytes([buf[pos + 17], buf[pos + 18]]);
+            let compression = attributes & 0x07;
+
+            if compression != 0 {
+                let record_count = i32::from_be_bytes([buf[pos + 29], buf[pos + 30], buf[pos + 31], buf[pos + 32]]);
+                results.push(format!("({} record(s), compressed)", record_count));
+                pos += 12 + batch_len;
+                continue;
+            }
+
+            // Uncompressed: records start at offset +49 from batch start
+            let records_start = pos + 49;
+            let records_end = pos + 12 + batch_len;
+            let mut rpos = records_start;
+
+            while rpos < records_end {
+                if let Some((value, consumed)) = parse_record(buf, rpos, records_end) {
+                    if let Some(v) = value {
+                        results.push(v);
+                    }
+                    rpos += consumed;
+                } else {
+                    break;
+                }
+            }
+
+            pos += 12 + batch_len;
+        } else {
+            pos += 1;
+        }
+    }
+
+    if results.is_empty() { None } else { Some(results) }
+}
+
+/// Parse a single Record from a RecordBatch (uncompressed)
+/// Record: length(varint) + attributes(1) + timestampDelta(varint) + offsetDelta(varint)
+///         + keyLength(varint) + key + valueLength(varint) + value + headersCount(varint) + ...
+fn parse_record(buf: &[u8], start: usize, end: usize) -> Option<(Option<String>, usize)> {
+    let mut pos = start;
+    if pos >= end { return None; }
+
+    // record length (varint)
+    let (record_len, n) = decode_varint(buf, pos)?;
+    pos += n;
+    let record_len = record_len as usize;
+    if pos + record_len > end { return None; }
+    let record_end = pos + record_len;
+
+    // attributes (1 byte)
+    if pos >= record_end { return Some((None, (record_end - start))); }
+    pos += 1;
+
+    // timestampDelta (varint)
+    let (_, n) = decode_varint(buf, pos)?;
+    pos += n;
+
+    // offsetDelta (varint)
+    let (_, n) = decode_varint(buf, pos)?;
+    pos += n;
+
+    // keyLength (varint) — -1 means null
+    let (key_len, n) = decode_varint(buf, pos)?;
+    pos += n;
+    if key_len > 0 {
+        pos += key_len as usize;
+    }
+
+    // valueLength (varint)
+    let (value_len, n) = decode_varint(buf, pos)?;
+    pos += n;
+
+    let value = if value_len > 0 && pos + value_len as usize <= record_end {
+        let v = &buf[pos..pos + value_len as usize];
+        Some(String::from_utf8_lossy(v).to_string())
+    } else {
+        None
+    };
+
+    Some((value, record_end - start))
+}
+
+/// Decode a zigzag-encoded varint
+fn decode_varint(buf: &[u8], start: usize) -> Option<(i64, usize)> {
+    let mut result: u64 = 0;
+    let mut shift = 0;
+    let mut pos = start;
+    loop {
+        if pos >= buf.len() { return None; }
+        let byte = buf[pos];
+        result |= ((byte & 0x7F) as u64) << shift;
+        pos += 1;
+        if byte & 0x80 == 0 { break; }
+        shift += 7;
+        if shift > 63 { return None; }
+    }
+    // zigzag decode
+    let decoded = ((result >> 1) as i64) ^ -((result & 1) as i64);
+    Some((decoded, pos - start))
+}
+
 /// Check if a Kafka request frame is complete (length-prefixed)
 pub fn kafka_frame_complete(buf: &[u8]) -> bool {
     if buf.len() < 4 { return false; }
