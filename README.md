@@ -128,6 +128,7 @@ Ocular runs lightweight TCP proxies between your application and middleware. Tra
 | `y` | Copy selected command(s) to clipboard |
 | `e` | Open selected command(s) in `$EDITOR` |
 | `Space` | Open leader menu |
+| `Space f` | Toggle follow mode (tail -f) |
 | `?` | Help popup |
 | `q` | Quit |
 
