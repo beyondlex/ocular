@@ -4,7 +4,12 @@ A TUI tool for real-time visualization of middleware traffic. See exactly what y
 
 ![Rust](https://img.shields.io/badge/rust-stable-orange) ![License](https://img.shields.io/badge/license-MIT-blue)
 
-![Ocular TUI](ocular.png)
+
+<img max-width="1370" alt="ocular" src="https://github.com/user-attachments/assets/565c8dbc-b295-4cec-a4a4-7beb6c0ddab9" />
+
+
+<video src="https://github.com/user-attachments/assets/d4b2803b-2651-4807-9432-3766dd66e9c2" controls="controls" muted="muted" style="max-width: 1370px" autoplay="autoplay" loop="loop">
+</video>
 
 ## How It Works
 
