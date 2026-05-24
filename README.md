@@ -56,6 +56,14 @@ Your App ──→ Ocular Proxy (16379) ──→ Redis (6379)
 ### Install
 
 ```bash
+# Homebrew (macOS / Linux)
+brew tap beyondlex/tap
+brew install ocular
+
+# Cargo
+cargo install ocular-cli
+
+# Shell script
 curl -fsSL https://raw.githubusercontent.com/beyondlex/ocular/main/install.sh | sh
 ```
 
