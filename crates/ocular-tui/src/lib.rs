@@ -1,4 +1,6 @@
 use anyhow::Result;
+use fuzzy_matcher::skim::SkimMatcherV2;
+use fuzzy_matcher::FuzzyMatcher;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -112,24 +114,36 @@ struct App {
     exclude_matchers: std::collections::HashMap<String, ExcludeMatcher>,
     event_format: EventFormat,
     latency_threshold_ms: Option<f64>,
+    fuzzy_filter: bool,
 }
 
 impl App {
-    fn filtered_events(&self) -> Vec<(usize, &ProxyEvent)> {
-        self.events.iter().enumerate().filter(|(_, ev)| {
+    fn filtered_events(&self) -> Vec<(usize, &ProxyEvent, Vec<usize>)> {
+        let matcher = SkimMatcherV2::default();
+        self.events.iter().enumerate().filter_map(|(i, ev)| {
             if let Some(idx) = self.component_idx {
                 if let Some(c) = self.components.get(idx) {
-                    if ev.component != c.name { return false; }
+                    if ev.component != c.name { return None; }
                 }
             }
             if !self.filter.is_empty() {
-                let q = self.filter.to_lowercase();
-                if !ev.component.to_lowercase().contains(&q)
-                    && !ev.command.to_lowercase().contains(&q) {
-                    return false;
+                if self.fuzzy_filter {
+                    if let Some((_, indices)) = matcher.fuzzy_indices(&ev.command, &self.filter) {
+                        return Some((i, ev, indices));
+                    }
+                    if matcher.fuzzy_match(&ev.component, &self.filter).is_some() {
+                        return Some((i, ev, vec![]));
+                    }
+                    return None;
+                } else {
+                    let q = self.filter.to_lowercase();
+                    if !ev.component.to_lowercase().contains(&q)
+                        && !ev.command.to_lowercase().contains(&q) {
+                        return None;
+                    }
                 }
             }
-            true
+            Some((i, ev, vec![]))
         }).collect()
     }
 }
@@ -212,6 +226,8 @@ struct ReloadableConfig {
     event_format: Option<String>,
     #[serde(default)]
     latency_threshold_ms: Option<f64>,
+    #[serde(default = "default_true")]
+    fuzzy_filter: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,6 +292,7 @@ pub async fn run(
         exclude_matchers,
         event_format: fmt,
         latency_threshold_ms: None,
+        fuzzy_filter: true,
     };
 
     let mut last_mtime = SystemTime::UNIX_EPOCH;
@@ -504,7 +521,7 @@ pub async fn run(
                     KeyCode::Char('e') if app.focus == Focus::Detail => {
                         app.pending_keys.clear();
                         let filtered = app.filtered_events();
-                        if let Some((_, ev)) = filtered.get(app.selected) {
+                        if let Some((_, ev, _)) = filtered.get(app.selected) {
                             let meta = format!("# Time: {}  Src: {}  Dest: {}  Process: {}  Latency: {}",
                                 format_time(&ev.timestamp),
                                 ev.src.as_deref().unwrap_or("-"),
@@ -581,6 +598,8 @@ pub async fn run(
     Ok(())
 }
 
+fn default_true() -> bool { true }
+
 fn format_time(ts: &std::time::SystemTime) -> String {
     let dt: chrono::DateTime<chrono::Local> = (*ts).into();
     dt.format("%H:%M:%S%.3f").to_string()
@@ -653,6 +672,9 @@ fn reload_config(app: &mut App, cfg: &ReloadableConfig) {
 
     // Reload latency threshold
     app.latency_threshold_ms = cfg.latency_threshold_ms;
+
+    // Reload fuzzy filter setting
+    app.fuzzy_filter = cfg.fuzzy_filter;
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
@@ -724,12 +746,12 @@ fn ui(f: &mut Frame, app: &mut App) {
     let event_items: Vec<ListItem> = filtered.iter().enumerate()
         .skip(visible_start)
         .take(visible_height)
-        .map(|(idx, (orig_idx, ev))| {
+        .map(|(idx, (orig_idx, ev, match_indices))| {
             let time = format_time(&ev.timestamp);
             let lat = format_latency(&ev.latency);
-            let spans: Vec<Span> = app.event_format.segments.iter().map(|seg| {
+            let spans: Vec<Span> = app.event_format.segments.iter().flat_map(|seg| {
                 match seg {
-                    FormatSegment::Literal(s) => Span::raw(s.clone()),
+                    FormatSegment::Literal(s) => vec![Span::raw(s.clone())],
                     FormatSegment::Field { name, width } => {
                         let (raw, style) = match name.as_str() {
                             "index" => (format!("{}", orig_idx + 1), theme.line_number),
@@ -754,7 +776,26 @@ fn ui(f: &mut Frame, app: &mut App) {
                             Some(w) if *w < 0 => format!("{:<width$}", raw, width = (-*w) as usize),
                             _ => raw,
                         };
-                        Span::styled(formatted, style)
+                        // Highlight matched chars in command field
+                        if name == "command" && !match_indices.is_empty() {
+                            let highlight = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+                            let chars: Vec<char> = formatted.chars().collect();
+                            let mut result: Vec<Span> = Vec::new();
+                            let mut i = 0;
+                            while i < chars.len() {
+                                if match_indices.contains(&i) {
+                                    let start = i;
+                                    while i < chars.len() && match_indices.contains(&i) { i += 1; }
+                                    result.push(Span::styled(chars[start..i].iter().collect::<String>(), highlight));
+                                } else {
+                                    let start = i;
+                                    while i < chars.len() && !match_indices.contains(&i) { i += 1; }
+                                    result.push(Span::styled(chars[start..i].iter().collect::<String>(), style));
+                                }
+                            }
+                            return result;
+                        }
+                        vec![Span::styled(formatted, style)]
                     }
                 }
             }).collect();
@@ -800,7 +841,7 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     // Detail panel
     let detail_focused = app.focus == Focus::Detail;
-    let selected_event = filtered.get(app.selected).map(|(_, ev)| *ev);
+    let selected_event = filtered.get(app.selected).map(|(_, ev, _)| *ev);
     let (detail_text, detail_meta): (Text, Line) = if let Some(ev) = selected_event {
         let mut lines: Vec<Line> = Vec::new();
 
@@ -1076,19 +1117,19 @@ fn copy_to_clipboard(text: &str) {
     }
 }
 
-fn get_selected_commands(filtered: &[(usize, &ProxyEvent)], app: &App) -> String {
+fn get_selected_commands(filtered: &[(usize, &ProxyEvent, Vec<usize>)], app: &App) -> String {
     if app.visual_mode {
         let lo = app.visual_anchor.min(app.selected);
         let hi = app.visual_anchor.max(app.selected);
         filtered.iter()
             .enumerate()
             .filter(|(idx, _)| *idx >= lo && *idx <= hi)
-            .map(|(_, (_, ev))| format_copy_text(ev))
+            .map(|(_, (_, ev, _))| format_copy_text(ev))
             .collect::<Vec<_>>()
             .join("\n")
     } else {
         filtered.get(app.selected)
-            .map(|(_, ev)| format_copy_text(ev))
+            .map(|(_, ev, _)| format_copy_text(ev))
             .unwrap_or_default()
     }
 }

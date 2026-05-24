@@ -12,6 +12,7 @@ serde.workspace = true
 regex.workspace = true
 toml.workspace = true
 chrono = "0.4"
+fuzzy-matcher = "0.3"
 sqlformat = "0.2"
 ocular-proxy = { path = "../ocular-proxy" }
 ocular-protocol = { path = "../ocular-protocol" }

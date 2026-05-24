@@ -328,6 +328,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fuzzy-matcher"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "54614a3312934d066701a80f20f15fa3b56d67ac7722b39eea5b4c9dd1d66c94"
+dependencies = [
+ "thread_local",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -592,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "ocular"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -610,14 +619,14 @@ dependencies = [
 
 [[package]]
 name = "ocular-protocol"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "ocular-proxy"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "ocular-protocol",
@@ -629,11 +638,12 @@ dependencies = [
 
 [[package]]
 name = "ocular-tui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "chrono",
  "crossterm",
+ "fuzzy-matcher",
  "ocular-protocol",
  "ocular-proxy",
  "ratatui",

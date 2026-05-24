@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.0 (2026-05-24)
+
+### New Features
+- **Fuzzy filter** — event filter now uses fuzzy matching (powered by skim algorithm), matched characters highlighted in yellow/bold in the event list
+- **`fuzzy_filter` config** — set `fuzzy_filter = false` in `ocular.toml` to use exact substring matching instead (hot-reloadable)
+
 ## v0.4.0 (2026-05-23)
 
 ### New Features
