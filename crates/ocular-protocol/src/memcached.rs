@@ -1,4 +1,4 @@
-/// Memcached text protocol parser
+// Memcached text protocol parser
 
 /// Parse a memcached request into a human-readable summary
 pub fn parse_memcached_request(buf: &[u8]) -> Option<String> {

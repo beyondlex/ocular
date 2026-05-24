@@ -1086,7 +1086,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from(""),
             Line::from(vec![Span::styled(" Leader (Space)", Style::default().add_modifier(Modifier::BOLD))]),
             Line::from(vec![Span::styled("  c         ", Style::default().fg(Color::Green)), Span::raw("Clear all events")]),
-            Line::from(vec![Span::styled("  f         ", Style::default().fg(Color::Green)), Span::raw("Toggle follow (tail -f)")]),
+            Line::from(vec![Span::styled("  f         ", Style::default().fg(Color::Green)), Span::raw("Toggle follow")]),
             Line::from(vec![Span::styled("  p         ", Style::default().fg(Color::Green)), Span::raw("Pause/resume")]),
             Line::from(vec![Span::styled("  ,         ", Style::default().fg(Color::Green)), Span::raw("Edit config")]),
             Line::from(""),
