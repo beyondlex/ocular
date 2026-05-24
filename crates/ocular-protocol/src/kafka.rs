@@ -39,6 +39,7 @@ fn api_key_name(key: i16) -> &'static str {
         37 => "SaslAuthenticate",
         42 => "DeleteGroups",
         44 => "IncrementalAlterConfigs",
+        46 => "DescribeProducers",
         47 => "OffsetDelete",
         50 => "DescribeCluster",
         60 => "DescribeTopicPartitions",
