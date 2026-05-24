@@ -5,6 +5,7 @@ pub mod postgres;
 pub mod mongodb;
 pub mod http;
 pub mod memcached;
+pub mod kafka;
 pub mod handler;
 pub mod handlers;
 
@@ -55,6 +56,7 @@ pub enum Protocol {
     Mongodb,
     Http,
     Memcached,
+    Kafka,
 }
 
 impl Protocol {
@@ -67,6 +69,7 @@ impl Protocol {
             "mongodb" | "mongo" => Some(Protocol::Mongodb),
             "http" | "elasticsearch" | "es" => Some(Protocol::Http),
             "memcached" | "memcache" => Some(Protocol::Memcached),
+            "kafka" => Some(Protocol::Kafka),
             _ => None,
         }
     }
@@ -102,5 +105,6 @@ pub fn get_handler(protocol: Protocol) -> &'static dyn ProtocolHandler {
         Protocol::Mongodb => &MongodbHandler,
         Protocol::Http => &HttpHandler,
         Protocol::Memcached => &MemcachedHandler,
+        Protocol::Kafka => &KafkaHandler,
     }
 }

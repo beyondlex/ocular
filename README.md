@@ -110,6 +110,7 @@ Ocular runs lightweight TCP proxies between your application and middleware. Tra
 | RabbitMQ (AMQP) | ✅ |
 | MongoDB | ✅ |
 | Memcached | ✅ |
+| Kafka | ✅ |
 | HTTP / Elasticsearch | ✅ |
 
 ## Keybindings

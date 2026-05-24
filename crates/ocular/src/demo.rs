@@ -31,6 +31,9 @@ const EVENTS: &[DemoEvent] = &[
     DemoEvent { component: "memcached", protocol: Protocol::Memcached, command: "SET session:abc \"token_xyz_expire_3600\"", response: "STORED", latency_ms: 0.28 },
     DemoEvent { component: "memcached", protocol: Protocol::Memcached, command: "GET session:abc", response: "VALUE session:abc (24 bytes)", latency_ms: 0.22 },
     DemoEvent { component: "memcached", protocol: Protocol::Memcached, command: "INCR rate_limit:user:1001 1", response: "47", latency_ms: 0.18 },
+    DemoEvent { component: "kafka", protocol: Protocol::Kafka, command: "Produce v9 topic=order.events", response: "OK (32 bytes)", latency_ms: 2.34 },
+    DemoEvent { component: "kafka", protocol: Protocol::Kafka, command: "Fetch v13 topic=order.events", response: "OK (1284 bytes)", latency_ms: 5.12 },
+    DemoEvent { component: "kafka", protocol: Protocol::Kafka, command: "Metadata v12", response: "OK (96 bytes)", latency_ms: 1.05 },
     DemoEvent { component: "mysql", protocol: Protocol::Mysql, command: "SELECT COUNT(*) as total FROM orders WHERE created_at >= CURDATE()", response: "ResultSet (1 row, 1 col)", latency_ms: 1.54 },
 ];
 
@@ -57,7 +60,7 @@ pub async fn run_demo(tx: broadcast::Sender<ProxyEvent>) {
 }
 
 pub fn demo_components() -> Vec<ocular_tui::ComponentInfo> {
-    ["redis", "mysql", "postgres", "rabbitmq", "mongodb", "elasticsearch", "memcached"]
+    ["redis", "mysql", "postgres", "rabbitmq", "mongodb", "elasticsearch", "memcached", "kafka"]
         .iter()
         .map(|name| ocular_tui::ComponentInfo {
             name: name.to_string(),

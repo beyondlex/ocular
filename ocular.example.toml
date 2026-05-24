@@ -79,6 +79,12 @@ remote = "127.0.0.1:3306"
 # remote = "127.0.0.1:11211"
 
 # [[proxy]]
+# name = "kafka"
+# protocol = "kafka"
+# listen = "127.0.0.1:19092"
+# remote = "127.0.0.1:9092"
+
+# [[proxy]]
 # name = "elasticsearch"
 # protocol = "http"
 # listen = "127.0.0.1:19200"

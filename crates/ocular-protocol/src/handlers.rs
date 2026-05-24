@@ -180,3 +180,27 @@ impl ProtocolHandler for MemcachedHandler {
         crate::memcached::memcached_response_complete(buf)
     }
 }
+
+// ─── Kafka ──────────────────────────────────────────────────────────────────
+
+pub struct KafkaHandler;
+
+impl ProtocolHandler for KafkaHandler {
+    fn parse_request(&self, buf: &[u8]) -> Option<String> {
+        crate::kafka::parse_kafka_request(buf)
+    }
+    fn parse_response(&self, buf: &[u8]) -> Option<String> {
+        crate::kafka::parse_kafka_response(buf)
+    }
+    fn format_response_detail(&self, buf: &[u8]) -> Option<String> {
+        crate::kafka::format_kafka_response_detail(buf)
+    }
+    fn needs_request_buffering(&self) -> bool { true }
+    fn needs_response_buffering(&self) -> bool { true }
+    fn request_complete(&self, buf: &[u8]) -> bool {
+        crate::kafka::kafka_frame_complete(buf)
+    }
+    fn response_complete(&self, buf: &[u8]) -> bool {
+        crate::kafka::kafka_frame_complete(buf)
+    }
+}
