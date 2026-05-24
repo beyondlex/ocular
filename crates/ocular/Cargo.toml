@@ -1,7 +1,13 @@
 [package]
-name = "ocular"
+name = "ocular-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "TUI tool for real-time visualization of middleware traffic"
+keywords = ["tui", "proxy", "redis", "mysql", "debugging"]
+categories = ["command-line-utilities", "development-tools::debugging"]
 
 [[bin]]
 name = "ocular"
@@ -17,6 +23,6 @@ tracing-subscriber.workspace = true
 tracing-appender.workspace = true
 dirs = "5"
 chrono.workspace = true
-ocular-proxy = { path = "../ocular-proxy" }
-ocular-tui = { path = "../ocular-tui" }
-ocular-protocol = { path = "../ocular-protocol" }
+ocular-proxy = { path = "../ocular-proxy", version = "0.5.0" }
+ocular-tui = { path = "../ocular-tui", version = "0.5.0" }
+ocular-protocol = { path = "../ocular-protocol", version = "0.5.0" }

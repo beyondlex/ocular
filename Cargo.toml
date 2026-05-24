@@ -5,6 +5,10 @@ resolver = "2"
 [workspace.package]
 version = "0.5.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/beyondlex/ocular"
+homepage = "https://github.com/beyondlex/ocular"
+authors = ["beyondlex"]
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

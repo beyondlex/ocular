@@ -2,6 +2,9 @@
 name = "ocular-protocol"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Wire protocol parsers for ocular (Redis, MySQL, PostgreSQL, MongoDB, AMQP, HTTP)"
 
 [dependencies]
 anyhow.workspace = true

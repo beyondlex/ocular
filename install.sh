@@ -2,7 +2,7 @@
 set -e
 
 REPO="beyondlex/ocular"
-INSTALL_DIR="/usr/local/bin"
+INSTALL_DIR="${OCULAR_INSTALL_DIR:-$HOME/.local/bin}"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ocular"
 CONFIG_FILE="$CONFIG_DIR/ocular.toml"
 
@@ -31,12 +31,9 @@ echo "Downloading $ASSET..."
 curl -fSL "$DOWNLOAD_URL" -o /tmp/ocular
 chmod +x /tmp/ocular
 
+mkdir -p "$INSTALL_DIR"
 echo "Installing to $INSTALL_DIR/ocular..."
-if [ -w "$INSTALL_DIR" ]; then
-  mv /tmp/ocular "$INSTALL_DIR/ocular"
-else
-  sudo mv /tmp/ocular "$INSTALL_DIR/ocular"
-fi
+mv /tmp/ocular "$INSTALL_DIR/ocular"
 
 # Copy example config if not exists
 if [ ! -f "$CONFIG_FILE" ]; then
@@ -49,5 +46,11 @@ else
 fi
 
 echo ""
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*) ;;
+  *) echo "Note: Add $INSTALL_DIR to your PATH:"
+     echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
+     echo "" ;;
+esac
 echo "Done! Edit $CONFIG_FILE to configure your proxy targets (Redis, MySQL, etc.),"
 echo "then run 'ocular' to start."
