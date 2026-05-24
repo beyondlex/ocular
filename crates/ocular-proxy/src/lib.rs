@@ -244,9 +244,11 @@ async fn handle_conn(
                 }
             } else if protocol == Protocol::Kafka {
                 kafka_req_buf.extend_from_slice(data);
-                if ocular_protocol::kafka::kafka_frame_complete(&kafka_req_buf) {
-                    if let Some(command) = parse_request(protocol, &kafka_req_buf) {
-                        let full_command = extract_full_command(protocol, &kafka_req_buf).unwrap_or_else(|| command.clone());
+                while ocular_protocol::kafka::kafka_frame_complete(&kafka_req_buf) {
+                    let frame_len = i32::from_be_bytes([kafka_req_buf[0], kafka_req_buf[1], kafka_req_buf[2], kafka_req_buf[3]]) as usize + 4;
+                    let frame = &kafka_req_buf[..frame_len];
+                    if let Some(command) = parse_request(protocol, frame) {
+                        let full_command = extract_full_command(protocol, frame).unwrap_or_else(|| command.clone());
                         *pending_w.lock().await = Some(PendingRequest {
                             timestamp: SystemTime::now(),
                             instant: Instant::now(),
@@ -254,7 +256,7 @@ async fn handle_conn(
                             full_command,
                         });
                     }
-                    kafka_req_buf.clear();
+                    kafka_req_buf = kafka_req_buf[frame_len..].to_vec();
                 }
             } else if let Some(command) = parse_request(protocol, data) {
                 let full_command = extract_full_command(protocol, data).unwrap_or_else(|| command.clone());
@@ -485,11 +487,12 @@ async fn handle_conn(
                 }
             } else if protocol == Protocol::Kafka {
                 kafka_resp_buf.extend_from_slice(data);
-                if ocular_protocol::kafka::kafka_frame_complete(&kafka_resp_buf) {
+                while ocular_protocol::kafka::kafka_frame_complete(&kafka_resp_buf) {
+                    let frame_len = i32::from_be_bytes([kafka_resp_buf[0], kafka_resp_buf[1], kafka_resp_buf[2], kafka_resp_buf[3]]) as usize + 4;
                     if let Some(req) = pending_r.lock().await.take() {
                         let latency = req.instant.elapsed();
-                        let response = parse_response(protocol, &kafka_resp_buf).unwrap_or_default();
-                        let response_detail = format_response_detail(protocol, &kafka_resp_buf).unwrap_or_else(|| response.clone());
+                        let response = parse_response(protocol, &kafka_resp_buf[..frame_len]).unwrap_or_default();
+                        let response_detail = format_response_detail(protocol, &kafka_resp_buf[..frame_len]).unwrap_or_else(|| response.clone());
                         let _ = tx_resp.send(ProxyEvent {
                             timestamp: req.timestamp,
                             component: name_resp.clone(),
@@ -504,7 +507,7 @@ async fn handle_conn(
                             dest: Some(dest_resp.clone()),
                         });
                     }
-                    kafka_resp_buf.clear();
+                    kafka_resp_buf = kafka_resp_buf[frame_len..].to_vec();
                 }
             } else {
                 // Redis/MongoDB: single request/response per read
