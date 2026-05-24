@@ -7,6 +7,8 @@ use tracing::info;
 use tracing_appender::rolling;
 use tracing_subscriber::{fmt, EnvFilter};
 
+mod demo;
+
 #[derive(Debug, Deserialize)]
 pub struct Config {
     pub proxy: Vec<ProxyConfig>,
@@ -99,6 +101,17 @@ async fn main() -> Result<()> {
     if args.iter().any(|a| a == "-v" || a == "--version") {
         println!("ocular {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
+    }
+
+    if args.iter().any(|a| a == "--demo") {
+        let (tx, _) = broadcast::channel::<ocular_proxy::ProxyEvent>(1024);
+        let tx2 = tx.clone();
+        tokio::spawn(async move { demo::run_demo(tx2).await });
+        let rx = tx.subscribe();
+        let components = demo::demo_components();
+        let theme = ocular_tui::Theme::by_name("tokyo-night-storm");
+        let config_path = PathBuf::from("ocular.toml");
+        return ocular_tui::run(rx, components, theme, config_path, None, true, false).await;
     }
 
     let (config, config_dir, config_path) = load_config()?;
