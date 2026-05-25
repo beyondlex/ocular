@@ -601,7 +601,7 @@ dependencies = [
 
 [[package]]
 name = "ocular-cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -619,14 +619,14 @@ dependencies = [
 
 [[package]]
 name = "ocular-protocol"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "ocular-proxy"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "ocular-protocol",
@@ -638,7 +638,7 @@ dependencies = [
 
 [[package]]
 name = "ocular-tui"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "chrono",
