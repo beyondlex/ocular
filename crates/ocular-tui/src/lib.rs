@@ -90,7 +90,56 @@ impl ExcludeMatcher {
 }
 
 #[derive(PartialEq, Clone, Copy)]
-enum Focus { Components, Events, Detail, Filter }
+enum Focus { Components, Events, Detail, Filter, ComponentFilter }
+
+const PROTOCOLS: &[&str] = &["redis", "mysql", "postgres", "amqp", "mongodb", "http", "memcached", "kafka"];
+
+fn default_port(protocol: &str) -> &'static str {
+    match protocol {
+        "redis" => "6379",
+        "mysql" => "3306",
+        "postgres" => "5432",
+        "amqp" => "5672",
+        "mongodb" => "27017",
+        "http" => "9200",
+        "memcached" => "11211",
+        "kafka" => "9092",
+        _ => "",
+    }
+}
+
+/// Fields: 0=name, 1=protocol(selector), 2=listen_host, 3=listen_port, 4=remote_host, 5=remote_port
+#[derive(Default)]
+struct ProxyForm {
+    fields: [String; 6],
+    active_field: usize,
+    editing_idx: Option<usize>,
+    protocol_idx: usize,
+    error: Option<String>,
+}
+
+impl ProxyForm {
+    #[allow(dead_code)]
+    fn from_component(idx: usize, ci: &ComponentInfo) -> Self {
+        let protocol_idx = PROTOCOLS.iter().position(|&p| ci.name.contains(p) || ci.listen.contains(p)).unwrap_or(0);
+        let (lh, lp) = split_addr(&ci.listen);
+        Self {
+            fields: [ci.name.clone(), String::new(), lh, lp, String::new(), String::new()],
+            active_field: 0,
+            editing_idx: Some(idx),
+            protocol_idx,
+            error: None,
+        }
+    }
+}
+
+fn split_addr(addr: &str) -> (String, String) {
+    if let Some((h, p)) = addr.rsplit_once(':') {
+        (h.to_string(), p.to_string())
+    } else {
+        (addr.to_string(), String::new())
+    }
+}
 
 struct App {
     events: Vec<ProxyEvent>,
@@ -116,6 +165,24 @@ struct App {
     event_format: EventFormat,
     latency_threshold_ms: Option<f64>,
     fuzzy_filter: bool,
+    // Proxy CRUD state
+    proxy_form: Option<ProxyForm>,
+    delete_confirm_idx: Option<usize>,
+    info_popup_idx: Option<usize>,
+    component_filter: String,
+    config_path: PathBuf,
+}
+
+fn filtered_component_indices(app: &App) -> Vec<usize> {
+    if app.component_filter.is_empty() {
+        (0..app.components.len()).collect()
+    } else {
+        let matcher = SkimMatcherV2::default();
+        app.components.iter().enumerate().filter(|(_, c)| {
+            let target = format!("{} {} {}", c.name, c.listen, c.listen);
+            matcher.fuzzy_match(&target, &app.component_filter).is_some()
+        }).map(|(i, _)| i).collect()
+    }
 }
 
 impl App {
@@ -237,6 +304,11 @@ struct ReloadableProxy {
     #[serde(default)]
     protocol: String,
     #[serde(default)]
+    #[allow(dead_code)]
+    listen: String,
+    #[serde(default)]
+    remote: String,
+    #[serde(default)]
     exclude: Option<ReloadableExclude>,
     #[serde(default)]
     include: Option<ReloadableExclude>,
@@ -303,6 +375,11 @@ pub async fn run(
         event_format: fmt,
         latency_threshold_ms: None,
         fuzzy_filter: true,
+        proxy_form: None,
+        delete_confirm_idx: None,
+        info_popup_idx: None,
+        component_filter: String::new(),
+        config_path: config_path.clone(),
     };
 
     let mut last_mtime = SystemTime::UNIX_EPOCH;
@@ -377,6 +454,140 @@ pub async fn run(
                     break;
                 }
 
+                // Proxy form handling (6 fields: name, protocol, listen_host, listen_port, remote_host, remote_port)
+                if let Some(ref mut form) = app.proxy_form {
+                    match key.code {
+                        KeyCode::Esc => { app.proxy_form = None; }
+                        KeyCode::Tab => { form.active_field = (form.active_field + 1) % 6; form.error = None; }
+                        KeyCode::BackTab => { form.active_field = (form.active_field + 5) % 6; form.error = None; }
+                        KeyCode::Enter => {
+                            let protocol = PROTOCOLS[form.protocol_idx];
+                            let name = form.fields[0].trim().to_string();
+                            let listen_host = if form.fields[2].is_empty() { "127.0.0.1" } else { form.fields[2].trim() };
+                            let listen_port = if form.fields[3].is_empty() { "" } else { form.fields[3].trim() };
+                            let remote_host = if form.fields[4].is_empty() { "127.0.0.1" } else { form.fields[4].trim() };
+                            let remote_port = if form.fields[5].is_empty() { default_port(protocol) } else { form.fields[5].trim() };
+
+                            // Validation
+                            if name.is_empty() {
+                                form.error = Some("name is required".into());
+                            } else if listen_port.is_empty() {
+                                form.error = Some("listen port is required".into());
+                            } else if remote_port.is_empty() {
+                                form.error = Some("remote port is required".into());
+                            } else {
+                                // Name uniqueness check
+                                let name_taken = app.components.iter().enumerate().any(|(i, c)| {
+                                    c.name == name && form.editing_idx != Some(i)
+                                });
+                                if name_taken {
+                                    form.error = Some(format!("name \"{}\" already exists", name));
+                                } else {
+                                    // Port-in-use check for listen (skip if address unchanged in edit mode)
+                                    let listen_addr = format!("{}:{}", listen_host, listen_port);
+                                    let addr_unchanged = form.editing_idx.and_then(|i| app.components.get(i))
+                                        .is_some_and(|c| c.listen == listen_addr);
+                                    if !addr_unchanged {
+                                        if let Err(e) = check_port_available(&listen_addr) {
+                                            form.error = Some(e);
+                                            continue;
+                                        }
+                                    }
+                                    {
+                                        let remote_addr = format!("{}:{}", remote_host, remote_port);
+                                        let editing_idx = form.editing_idx;
+                                        app.proxy_form = None;
+                                        let ci = ComponentInfo {
+                                            name: name.clone(),
+                                            listen: listen_addr.clone(),
+                                            exclude: None,
+                                            include: None,
+                                        };
+                                        if let Some(idx) = editing_idx {
+                                            if let Some(c) = app.components.get_mut(idx) {
+                                                c.name = name.clone();
+                                                c.listen = listen_addr.clone();
+                                            }
+                                        } else {
+                                            app.components.push(ci);
+                                        }
+                                        save_proxy_config(&app.config_path, &app.components, protocol, editing_idx, &name, &listen_addr, &remote_addr);
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Left if form.active_field == 1 => {
+                            form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len();
+                        }
+                        KeyCode::Right if form.active_field == 1 => {
+                            form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len();
+                        }
+                        KeyCode::Backspace => {
+                            if form.active_field == 1 {
+                                form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len();
+                            } else {
+                                form.fields[form.active_field].pop();
+                            }
+                            form.error = None;
+                        }
+                        KeyCode::Char(c) => {
+                            if form.active_field == 1 {
+                                form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len();
+                            } else {
+                                form.fields[form.active_field].push(c);
+                            }
+                            form.error = None;
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // Delete confirm handling
+                if let Some(idx) = app.delete_confirm_idx {
+                    match key.code {
+                        KeyCode::Char('y') | KeyCode::Enter => {
+                            if idx < app.components.len() {
+                                let removed = app.components.remove(idx);
+                                app.exclude_matchers.remove(&removed.name);
+                                delete_proxy_from_config(&app.config_path, &removed.name);
+                                if let Some(ci) = app.component_idx {
+                                    if ci >= app.components.len() {
+                                        app.component_idx = if app.components.is_empty() { None } else { Some(app.components.len() - 1) };
+                                    }
+                                }
+                            }
+                            app.delete_confirm_idx = None;
+                        }
+                        _ => { app.delete_confirm_idx = None; }
+                    }
+                    continue;
+                }
+
+                // Info popup handling
+                if app.info_popup_idx.is_some() {
+                    match key.code {
+                        KeyCode::Char('i') | KeyCode::Esc => { app.info_popup_idx = None; }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // Component filter handling
+                if app.focus == Focus::ComponentFilter {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.component_filter.clear();
+                            app.focus = Focus::Components;
+                        }
+                        KeyCode::Enter => { app.focus = Focus::Components; }
+                        KeyCode::Backspace => { app.component_filter.pop(); }
+                        KeyCode::Char(c) => { app.component_filter.push(c); }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 if app.focus == Focus::Filter {
                     match key.code {
                         KeyCode::Esc => { app.focus = Focus::Events; }
@@ -447,12 +658,18 @@ pub async fn run(
                     }
                     KeyCode::Char('/') => {
                         app.pending_keys.clear();
-                        app.focus = Focus::Filter;
+                        if app.focus == Focus::Components {
+                            app.focus = Focus::ComponentFilter;
+                        } else {
+                            app.focus = Focus::Filter;
+                        }
                     }
                     KeyCode::Esc => {
                         app.pending_keys.clear();
                         if app.focus == Focus::Detail {
                             app.focus = Focus::Events;
+                        } else if app.focus == Focus::Components && !app.component_filter.is_empty() {
+                            app.component_filter.clear();
                         } else if !app.filter.is_empty() {
                             app.filter.clear();
                             app.selected = 0;
@@ -468,7 +685,7 @@ pub async fn run(
                     KeyCode::Tab => {
                         app.pending_keys.clear();
                         app.focus = match app.focus {
-                            Focus::Components => Focus::Events,
+                            Focus::Components | Focus::ComponentFilter => Focus::Events,
                             Focus::Events => Focus::Detail,
                             Focus::Detail => Focus::Components,
                             Focus::Filter => Focus::Events,
@@ -478,7 +695,7 @@ pub async fn run(
                     KeyCode::BackTab => {
                         app.pending_keys.clear();
                         app.focus = match app.focus {
-                            Focus::Components => Focus::Detail,
+                            Focus::Components | Focus::ComponentFilter => Focus::Detail,
                             Focus::Events => Focus::Components,
                             Focus::Detail => Focus::Events,
                             Focus::Filter => Focus::Events,
@@ -584,11 +801,17 @@ pub async fn run(
                         app.pending_keys.clear();
                         match app.focus {
                             Focus::Components => {
-                                app.component_idx = match app.component_idx {
-                                    None => Some(app.components.len().saturating_sub(1)),
-                                    Some(0) => None,
-                                    Some(i) => Some(i - 1),
-                                };
+                                let visible = filtered_component_indices(&app);
+                                if visible.is_empty() {
+                                    app.component_idx = None;
+                                } else {
+                                    let cur_pos = app.component_idx.and_then(|ci| visible.iter().position(|&v| v == ci));
+                                    app.component_idx = match cur_pos {
+                                        None => Some(*visible.last().unwrap()),
+                                        Some(0) => if app.component_filter.is_empty() { None } else { Some(visible[0]) },
+                                        Some(p) => Some(visible[p - 1]),
+                                    };
+                                }
                                 app.selected = 0;
                             }
                             Focus::Events => { app.selected = app.selected.saturating_sub(1); app.detail_scroll = 0; app.follow = false; }
@@ -600,12 +823,17 @@ pub async fn run(
                         app.pending_keys.clear();
                         match app.focus {
                             Focus::Components => {
-                                app.component_idx = match app.component_idx {
-                                    None => { if !app.components.is_empty() { Some(0) } else { None } }
-                                    Some(i) => {
-                                        if i + 1 < app.components.len() { Some(i + 1) } else { None }
-                                    }
-                                };
+                                let visible = filtered_component_indices(&app);
+                                if visible.is_empty() {
+                                    app.component_idx = None;
+                                } else {
+                                    let cur_pos = app.component_idx.and_then(|ci| visible.iter().position(|&v| v == ci));
+                                    app.component_idx = match cur_pos {
+                                        None => Some(visible[0]),
+                                        Some(p) if p + 1 < visible.len() => Some(visible[p + 1]),
+                                        _ => if app.component_filter.is_empty() { None } else { app.component_idx },
+                                    };
+                                }
                                 app.selected = 0;
                             }
                             Focus::Events => {
@@ -627,6 +855,48 @@ pub async fn run(
                         } else if app.focus == Focus::Events {
                             app.focus = Focus::Detail;
                             app.detail_scroll = 0;
+                        }
+                    }
+                    KeyCode::Char('n') if app.focus == Focus::Components => {
+                        app.pending_keys.clear();
+                        app.proxy_form = Some(ProxyForm::default());
+                    }
+                    KeyCode::Char('e') if app.focus == Focus::Components => {
+                        app.pending_keys.clear();
+                        if let Some(idx) = app.component_idx {
+                            if let Some(ci) = app.components.get(idx) {
+                                let (lh, lp) = split_addr(&ci.listen);
+                                let mut form = ProxyForm {
+                                    fields: [ci.name.clone(), String::new(), lh, lp, String::new(), String::new()],
+                                    active_field: 0,
+                                    editing_idx: Some(idx),
+                                    protocol_idx: 0,
+                                    error: None,
+                                };
+                                if let Ok(content) = std::fs::read_to_string(&app.config_path) {
+                                    if let Ok(cfg) = toml::from_str::<ReloadableConfig>(&content) {
+                                        if let Some(p) = cfg.proxy.iter().find(|p| p.name == ci.name) {
+                                            form.protocol_idx = PROTOCOLS.iter().position(|&x| x == p.protocol).unwrap_or(0);
+                                            let (rh, rp) = split_addr(&p.remote);
+                                            form.fields[4] = rh;
+                                            form.fields[5] = rp;
+                                        }
+                                    }
+                                }
+                                app.proxy_form = Some(form);
+                            }
+                        }
+                    }
+                    KeyCode::Char('d') if app.focus == Focus::Components => {
+                        app.pending_keys.clear();
+                        if let Some(idx) = app.component_idx {
+                            app.delete_confirm_idx = Some(idx);
+                        }
+                    }
+                    KeyCode::Char('i') if app.focus == Focus::Components => {
+                        app.pending_keys.clear();
+                        if let Some(idx) = app.component_idx {
+                            app.info_popup_idx = Some(idx);
                         }
                     }
                     _ => { app.pending_keys.clear(); }
@@ -731,41 +1001,80 @@ fn ui(f: &mut Frame, app: &mut App) {
         .split(outer[0]);
 
     // Left: component list
-    let comp_focused = app.focus == Focus::Components;
-    let items: Vec<ListItem> = std::iter::once(ListItem::new(
-        if app.component_idx.is_none() { " ● ALL".to_string() } else { "   ALL".to_string() }
-    ).style(if app.component_idx.is_none() && comp_focused {
-        Style::default().bg(Color::DarkGray).fg(Color::White)
-    } else if app.component_idx.is_none() {
-        Style::default().fg(Color::Cyan)
+    let comp_focused = app.focus == Focus::Components || app.focus == Focus::ComponentFilter;
+    let fuzzy = SkimMatcherV2::default();
+    let filter_active = !app.component_filter.is_empty();
+    let items: Vec<ListItem> = if filter_active {
+        // Filter indicator + filtered components
+        let mut result: Vec<ListItem> = vec![
+            ListItem::new(Line::from(Span::styled(
+                format!(" (filter: {})", app.component_filter),
+                Style::default().fg(Color::Rgb(255, 165, 0)),
+            ))),
+        ];
+        result.extend(app.components.iter().enumerate().filter(|(_, c)| {
+            let target = format!("{} {} {}", c.name, c.listen, c.listen);
+            fuzzy.fuzzy_match(&target, &app.component_filter).is_some()
+        }).map(|(i, c)| {
+            let selected = app.component_idx == Some(i);
+            let prefix = if selected { " ●" } else { "  " };
+            let style = if selected && comp_focused {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else if selected {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            let addr_style = Style::default().fg(Color::Rgb(100, 100, 100));
+            let count = app.events.iter().filter(|ev| ev.component == c.name).count();
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{} {}", prefix, c.name), style),
+                Span::styled(format!(" {}", count), addr_style),
+                Span::styled(format!(" ({})", c.listen), addr_style),
+            ])).style(style)
+        }));
+        result
     } else {
-        Style::default()
-    }))
-    .chain(app.components.iter().enumerate().map(|(i, c)| {
-        let selected = app.component_idx == Some(i);
-        let prefix = if selected { " ●" } else { "  " };
-        let style = if selected && comp_focused {
+        std::iter::once(ListItem::new(
+            if app.component_idx.is_none() { " ● ALL".to_string() } else { "   ALL".to_string() }
+        ).style(if app.component_idx.is_none() && comp_focused {
             Style::default().bg(Color::DarkGray).fg(Color::White)
-        } else if selected {
+        } else if app.component_idx.is_none() {
             Style::default().fg(Color::Cyan)
         } else {
             Style::default()
-        };
-        let addr_style = if selected && comp_focused {
-            Style::default().bg(Color::DarkGray).fg(Color::Rgb(160, 160, 160))
-        } else {
-            Style::default().fg(Color::Rgb(100, 100, 100))
-        };
-        let count = app.events.iter().filter(|ev| ev.component == c.name).count();
-        ListItem::new(Line::from(vec![
-            Span::styled(format!("{} {}", prefix, c.name), style),
-            Span::styled(format!(" {}", count), addr_style),
-            Span::styled(format!(" ({})", c.listen), addr_style),
-        ])).style(style)
-    })).collect();
+        }))
+        .chain(app.components.iter().enumerate().map(|(i, c)| {
+            let selected = app.component_idx == Some(i);
+            let prefix = if selected { " ●" } else { "  " };
+            let style = if selected && comp_focused {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else if selected {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            let addr_style = if selected && comp_focused {
+                Style::default().bg(Color::DarkGray).fg(Color::Rgb(160, 160, 160))
+            } else {
+                Style::default().fg(Color::Rgb(100, 100, 100))
+            };
+            let count = app.events.iter().filter(|ev| ev.component == c.name).count();
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{} {}", prefix, c.name), style),
+                Span::styled(format!(" {}", count), addr_style),
+                Span::styled(format!(" ({})", c.listen), addr_style),
+            ])).style(style)
+        })).collect()
+    };
+    let comp_title = if app.focus == Focus::ComponentFilter {
+        format!(" /{}▌", app.component_filter)
+    } else {
+        format!(" Ocular v{} ", env!("CARGO_PKG_VERSION"))
+    };
     let comp_border = if comp_focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
     let left = List::new(items)
-        .block(Block::default().borders(Borders::TOP).border_style(comp_border).title(format!(" Ocular v{} ", env!("CARGO_PKG_VERSION"))));
+        .block(Block::default().borders(Borders::TOP).border_style(comp_border).title(comp_title));
     f.render_widget(left, chunks[0]);
 
     // Right: vertical split
@@ -875,7 +1184,12 @@ fn ui(f: &mut Frame, app: &mut App) {
     if app.paused {
         title_spans.push(Span::styled(paused_info, Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)));
     }
-    title_spans.push(Span::raw(format!("{}{} ", filter_info, count_info)));
+    if !filter_info.is_empty() {
+        title_spans.push(Span::styled(filter_info, Style::default().fg(Color::Rgb(255, 165, 0))));
+    }
+    if !count_info.is_empty() {
+        title_spans.push(Span::raw(format!("{} ", count_info)));
+    }
     let event_list = List::new(event_items)
         .block(Block::default().borders(Borders::TOP).border_style(events_border)
             .title(Line::from(title_spans)));
@@ -1140,6 +1454,155 @@ fn ui(f: &mut Frame, app: &mut App) {
             .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)));
         f.render_widget(help_popup, help_area);
     }
+
+    // Proxy form popup
+    if let Some(ref form) = app.proxy_form {
+        let area = f.area();
+        let w: u16 = 54;
+        let h: u16 = 15;
+        let x = (area.width.saturating_sub(w)) / 2;
+        let y = (area.height.saturating_sub(h)) / 2;
+        let popup_area = Rect::new(x, y, w, h);
+        f.render_widget(Clear, popup_area);
+
+        let title = if form.editing_idx.is_some() { " Edit Proxy " } else { " New Proxy " };
+        let protocol = PROTOCOLS[form.protocol_idx];
+        let remote_default_port = default_port(protocol);
+
+        // field_idx, label, value, placeholder
+        let rows: Vec<(usize, &str, &str, &str)> = vec![
+            (0, "name", &form.fields[0], ""),
+            (1, "protocol", protocol, ""),
+            (2, "listen host", &form.fields[2], "127.0.0.1"),
+            (3, "listen port", &form.fields[3], ""),
+            (4, "remote host", &form.fields[4], "127.0.0.1"),
+            (5, "remote port", &form.fields[5], remote_default_port),
+        ];
+
+        let mut lines: Vec<Line> = Vec::new();
+        for &(i, label, value, placeholder) in &rows {
+            let cursor = if i == form.active_field { "▌" } else { "" };
+            let label_style = if i == form.active_field {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let hint = if i == 1 && i == form.active_field { " ◀ ▶" } else { "" };
+            let display = if value.is_empty() && !placeholder.is_empty() && i != form.active_field {
+                vec![
+                    Span::styled(format!(" {:>12}: ", label), label_style),
+                    Span::styled(placeholder.to_string(), Style::default().fg(Color::Rgb(80, 80, 80))),
+                ]
+            } else if value.is_empty() && !placeholder.is_empty() {
+                vec![
+                    Span::styled(format!(" {:>12}: ", label), label_style),
+                    Span::styled(format!("{}", cursor), Style::default().fg(Color::White)),
+                    Span::styled(format!(" ({})", placeholder), Style::default().fg(Color::Rgb(80, 80, 80))),
+                ]
+            } else {
+                vec![
+                    Span::styled(format!(" {:>12}: ", label), label_style),
+                    Span::styled(format!("{}{}", value, cursor), Style::default().fg(Color::White)),
+                    Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray)),
+                ]
+            };
+            lines.push(Line::from(display));
+        }
+        lines.push(Line::from(""));
+        if let Some(ref err) = form.error {
+            lines.push(Line::from(Span::styled(format!(" ⚠ {}", err), Style::default().fg(Color::Red))));
+        }
+        lines.push(Line::from(vec![
+            Span::styled(" Cancel", Style::default().fg(Color::DarkGray)),
+            Span::styled("(Esc)", Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled("Submit", Style::default().fg(Color::Green)),
+            Span::styled("(Enter)", Style::default().fg(Color::DarkGray)),
+        ]));
+
+        let popup = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(title));
+        f.render_widget(popup, popup_area);
+    }
+
+    // Delete confirm popup
+    if let Some(idx) = app.delete_confirm_idx {
+        let name = app.components.get(idx).map(|c| c.name.as_str()).unwrap_or("?");
+        let area = f.area();
+        let w: u16 = 36;
+        let h: u16 = 5;
+        let x = (area.width.saturating_sub(w)) / 2;
+        let y = (area.height.saturating_sub(h)) / 2;
+        let popup_area = Rect::new(x, y, w, h);
+        f.render_widget(Clear, popup_area);
+        let lines = vec![
+            Line::from(format!(" Delete \"{}\"?", name)),
+            Line::from(""),
+            Line::from(vec![
+                Span::raw(" "),
+                Span::styled("y/Enter", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                Span::raw(" confirm  "),
+                Span::styled("n/Esc", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::raw(" cancel"),
+            ]),
+        ];
+        let popup = Paragraph::new(lines)
+            .block(Block::default().borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Confirm Delete "));
+        f.render_widget(popup, popup_area);
+    }
+
+    // Info popup
+    if let Some(idx) = app.info_popup_idx {
+        if let Some(ci) = app.components.get(idx) {
+            let mut lines = vec![
+                Line::from(vec![
+                    Span::styled(" name:   ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(ci.name.clone(), Style::default().fg(Color::Cyan)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" listen: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(ci.listen.clone()),
+                ]),
+            ];
+            // Load protocol and remote from config
+            if let Ok(content) = std::fs::read_to_string(&app.config_path) {
+                if let Ok(cfg) = toml::from_str::<ReloadableConfig>(&content) {
+                    if let Some(p) = cfg.proxy.iter().find(|p| p.name == ci.name) {
+                        lines.insert(1, Line::from(vec![
+                            Span::styled(" proto:  ", Style::default().fg(Color::DarkGray)),
+                            Span::raw(p.protocol.clone()),
+                        ]));
+                        lines.push(Line::from(vec![
+                            Span::styled(" remote: ", Style::default().fg(Color::DarkGray)),
+                            Span::raw(p.remote.clone()),
+                        ]));
+                    }
+                }
+            }
+            let count = app.events.iter().filter(|ev| ev.component == ci.name).count();
+            lines.push(Line::from(vec![
+                Span::styled(" events: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(count.to_string(), Style::default().fg(Color::Yellow)),
+            ]));
+
+            let area = f.area();
+            let w: u16 = 44;
+            let h = lines.len() as u16 + 2;
+            let x = (area.width.saturating_sub(w)) / 2;
+            let y = (area.height.saturating_sub(h)) / 2;
+            let popup_area = Rect::new(x, y, w, h);
+            f.render_widget(Clear, popup_area);
+            let popup = Paragraph::new(lines)
+                .block(Block::default().borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(" Proxy Info (i to close) "));
+            f.render_widget(popup, popup_area);
+        }
+    }
 }
 
 fn copy_to_clipboard(text: &str) {
@@ -1317,4 +1780,53 @@ fn highlight_json_line(line: &str) -> Line<'static> {
         }
     }
     Line::from(spans)
+}
+
+fn check_port_available(addr: &str) -> Result<(), String> {
+    use std::net::TcpListener;
+    match TcpListener::bind(addr) {
+        Ok(_) => Ok(()),
+        Err(_) => Err(format!("port {} is already in use", addr)),
+    }
+}
+
+fn save_proxy_config(config_path: &std::path::Path, _components: &[ComponentInfo], protocol: &str, editing_idx: Option<usize>, name: &str, listen: &str, remote: &str) {
+    let Ok(content) = std::fs::read_to_string(config_path) else { return };
+    let Ok(mut doc) = content.parse::<toml_edit::DocumentMut>() else { return };
+
+    let proxies = doc.entry("proxy").or_insert_with(|| toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+    let toml_edit::Item::ArrayOfTables(arr) = proxies else { return };
+
+    if let Some(idx) = editing_idx {
+        // Edit existing
+        if let Some(table) = arr.get_mut(idx) {
+            table["name"] = toml_edit::value(name);
+            table["protocol"] = toml_edit::value(protocol);
+            table["listen"] = toml_edit::value(listen);
+            table["remote"] = toml_edit::value(remote);
+        }
+    } else {
+        // Add new
+        let mut table = toml_edit::Table::new();
+        table["name"] = toml_edit::value(name);
+        table["protocol"] = toml_edit::value(protocol);
+        table["listen"] = toml_edit::value(listen);
+        table["remote"] = toml_edit::value(remote);
+        arr.push(table);
+    }
+
+    let _ = std::fs::write(config_path, doc.to_string());
+}
+
+fn delete_proxy_from_config(config_path: &std::path::Path, name: &str) {
+    let Ok(content) = std::fs::read_to_string(config_path) else { return };
+    let Ok(mut doc) = content.parse::<toml_edit::DocumentMut>() else { return };
+
+    let Some(toml_edit::Item::ArrayOfTables(arr)) = doc.get_mut("proxy") else { return };
+    let idx = arr.iter().position(|t| t.get("name").and_then(|v| v.as_str()) == Some(name));
+    if let Some(idx) = idx {
+        arr.remove(idx);
+    }
+
+    let _ = std::fs::write(config_path, doc.to_string());
 }
