@@ -136,6 +136,43 @@ fn make_component_info(p: &ProxyConfig, global_excludes: &HashMap<String, Exclud
     }
 }
 
+fn apply_proxy_diff(
+    handles: &mut HashMap<String, ProxyHandle>,
+    new_proxies: &[ProxyConfig],
+    tx: &broadcast::Sender<ocular_proxy::ProxyEvent>,
+    change_tx: &broadcast::Sender<ProxyChange>,
+    global_excludes: &HashMap<String, ExcludeConfig>,
+) {
+    let new_names: HashMap<String, &ProxyConfig> = new_proxies.iter()
+        .map(|p| (p.name.clone(), p)).collect();
+
+    let old_names: Vec<String> = handles.keys().cloned().collect();
+    for name in &old_names {
+        if !new_names.contains_key(name) {
+            if let Some(ph) = handles.remove(name) {
+                let _ = ph.shutdown_tx.send(true);
+                let _ = change_tx.send(ProxyChange::Removed(name.clone()));
+            }
+        }
+    }
+    for (name, new_cfg) in &new_names {
+        let needs_restart = match handles.get(name.as_str()) {
+            None => true,
+            Some(ph) => ph.config.listen != new_cfg.listen || ph.config.remote != new_cfg.remote || ph.config.protocol != new_cfg.protocol,
+        };
+        if needs_restart {
+            if let Some(ph) = handles.remove(name.as_str()) {
+                let _ = ph.shutdown_tx.send(true);
+                let _ = change_tx.send(ProxyChange::Removed(name.clone()));
+            }
+            let ph = spawn_proxy(new_cfg, tx);
+            handles.insert(name.clone(), ph);
+            let ci = make_component_info(new_cfg, global_excludes);
+            let _ = change_tx.send(ProxyChange::Added(ci));
+        }
+    }
+}
+
 fn spawn_proxy(
     cfg: &ProxyConfig,
     tx: &broadcast::Sender<ocular_proxy::ProxyEvent>,
@@ -175,90 +212,118 @@ async fn main() -> Result<()> {
         let components = demo::demo_components();
         let theme = ocular_tui::Theme::by_name("tokyo-night-storm");
         let config_path = PathBuf::from("ocular.toml");
-        return ocular_tui::run(rx, components, theme, config_path, None, true, false, None).await;
+        return ocular_tui::run(rx, components, theme, config_path, None, true, false, None, None, None, None).await;
     }
 
     let (config, config_dir, config_path) = load_config()?;
     init_tracing(&config_dir);
     info!(proxies = config.proxy.len(), config_dir = %config_dir.display(), "ocular starting");
 
+    // Initialize group directory
+    let group_dir = config_dir.join("group");
+    std::fs::create_dir_all(&group_dir).ok();
+
+    // Determine active config file: main config proxies → "default" group
+    let (active_config_path, active_group) = if config.proxy.is_empty() {
+        // No proxies in main config, try first available group
+        let mut groups: Vec<String> = std::fs::read_dir(&group_dir).ok()
+            .map(|entries| entries.flatten()
+                .filter_map(|e| {
+                    let p = e.path();
+                    if p.extension().is_some_and(|ext| ext == "toml") {
+                        p.file_stem().and_then(|s| s.to_str().map(String::from))
+                    } else { None }
+                }).collect())
+            .unwrap_or_default();
+        groups.sort();
+        if let Some(first) = groups.first() {
+            (group_dir.join(format!("{}.toml", first)), Some(first.clone()))
+        } else {
+            (config_path.clone(), Some("default".to_string()))
+        }
+    } else {
+        // Main config has proxies → treat as "default" group
+        (config_path.clone(), Some("default".to_string()))
+    };
+
+    // Load proxies from active config
+    let active_proxies: Vec<ProxyConfig> = if active_config_path != config_path {
+        std::fs::read_to_string(&active_config_path).ok()
+            .and_then(|c| toml::from_str::<Config>(&c).ok())
+            .map(|c| c.proxy)
+            .unwrap_or_default()
+    } else {
+        config.proxy.clone()
+    };
+
     let (tx, _) = broadcast::channel::<ocular_proxy::ProxyEvent>(1024);
     let (proxy_change_tx, proxy_change_rx) = broadcast::channel::<ProxyChange>(64);
 
     // Spawn initial proxies
     let mut proxy_handles: HashMap<String, ProxyHandle> = HashMap::new();
-    for proxy_cfg in &config.proxy {
+    for proxy_cfg in &active_proxies {
         let ph = spawn_proxy(proxy_cfg, &tx);
         proxy_handles.insert(proxy_cfg.name.clone(), ph);
     }
 
     // Proxy hot-reload watcher task
-    let config_path_watch = config_path.clone();
+    let config_path_watch = active_config_path.clone();
     let tx_reload = tx.clone();
     let proxy_change_tx_clone = proxy_change_tx.clone();
     let initial_excludes = config.exclude.clone();
+    let _group_dir_watch = group_dir.clone();
     tokio::spawn(async move {
         let mut last_mtime = SystemTime::UNIX_EPOCH;
         let mut handles = proxy_handles;
         #[allow(unused_assignments)]
         let mut global_excludes: std::collections::HashMap<String, ExcludeConfig> = initial_excludes;
+        let mut watch_path = config_path_watch;
+        let mut change_rx = proxy_change_tx_clone.subscribe();
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let mtime = match std::fs::metadata(&config_path_watch).and_then(|m| m.modified()) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if mtime == last_mtime { continue; }
-            last_mtime = mtime;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    let mtime = match std::fs::metadata(&watch_path).and_then(|m| m.modified()) {
+                        Ok(t) => t,
+                        Err(_) => continue,
+                    };
+                    if mtime == last_mtime { continue; }
+                    last_mtime = mtime;
 
-            let content = match std::fs::read_to_string(&config_path_watch) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let new_config: Config = match toml::from_str(&content) {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(error = %e, "config parse error during hot-reload");
-                    continue;
+                    let content = match std::fs::read_to_string(&watch_path) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    let new_config: Config = match toml::from_str(&content) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "config parse error during hot-reload");
+                            continue;
+                        }
+                    };
+
+                    global_excludes = new_config.exclude.clone();
+                    apply_proxy_diff(&mut handles, &new_config.proxy, &tx_reload, &proxy_change_tx_clone, &global_excludes);
                 }
-            };
-
-            global_excludes = new_config.exclude.clone();
-
-            let new_names: HashMap<String, &ProxyConfig> = new_config.proxy.iter()
-                .map(|p| (p.name.clone(), p))
-                .collect();
-
-            // Remove proxies no longer in config
-            let old_names: Vec<String> = handles.keys().cloned().collect();
-            for name in &old_names {
-                if !new_names.contains_key(name) {
-                    if let Some(ph) = handles.remove(name) {
-                        let _ = ph.shutdown_tx.send(true);
-                        info!(component = %name, "proxy removed by hot-reload");
-                        let _ = proxy_change_tx_clone.send(ProxyChange::Removed(name.clone()));
+                Ok(change) = change_rx.recv() => {
+                    if let ProxyChange::SwitchGroup(new_path) = change {
+                        // Kill all existing proxies
+                        for (name, ph) in handles.drain() {
+                            let _ = ph.shutdown_tx.send(true);
+                            info!(component = %name, "proxy stopped for group switch");
+                        }
+                        // Load new group file
+                        watch_path = new_path;
+                        last_mtime = SystemTime::UNIX_EPOCH; // force reload on next tick
+                        if let Ok(content) = std::fs::read_to_string(&watch_path) {
+                            if let Ok(new_config) = toml::from_str::<Config>(&content) {
+                                for proxy_cfg in &new_config.proxy {
+                                    let ph = spawn_proxy(proxy_cfg, &tx_reload);
+                                    handles.insert(proxy_cfg.name.clone(), ph);
+                                    info!(component = %proxy_cfg.name, "proxy started for group switch");
+                                }
+                            }
+                        }
                     }
-                }
-            }
-
-            // Add or restart changed proxies
-            for (name, new_cfg) in &new_names {
-                let needs_restart = match handles.get(name.as_str()) {
-                    None => true,
-                    Some(ph) => ph.config.listen != new_cfg.listen || ph.config.remote != new_cfg.remote || ph.config.protocol != new_cfg.protocol,
-                };
-                if needs_restart {
-                    // Shutdown old if exists
-                    if let Some(ph) = handles.remove(name.as_str()) {
-                        let _ = ph.shutdown_tx.send(true);
-                        info!(component = %name, "proxy restarting due to config change");
-                        let _ = proxy_change_tx_clone.send(ProxyChange::Removed(name.clone()));
-                    }
-                    let ph = spawn_proxy(new_cfg, &tx_reload);
-                    handles.insert(name.clone(), ph);
-                    let ci = make_component_info(new_cfg, &global_excludes);
-                    let _ = proxy_change_tx_clone.send(ProxyChange::Added(ci));
-                    info!(component = %name, "proxy started by hot-reload");
                 }
             }
         }
@@ -310,7 +375,7 @@ async fn main() -> Result<()> {
     }
 
     let rx = tx.subscribe();
-    let components: Vec<ocular_tui::ComponentInfo> = config.proxy.iter()
+    let components: Vec<ocular_tui::ComponentInfo> = active_proxies.iter()
         .map(|p| make_component_info(p, &config.exclude))
         .collect();
 
@@ -321,5 +386,5 @@ async fn main() -> Result<()> {
         base_theme
     };
 
-    ocular_tui::run(rx, components, theme, config_path, config.event_format, config.leader_menu, config.quit_confirm, Some(proxy_change_rx)).await
+    ocular_tui::run(rx, components, theme, active_config_path, config.event_format, config.leader_menu, config.quit_confirm, Some(proxy_change_rx), Some(group_dir), active_group, Some(proxy_change_tx)).await
 }

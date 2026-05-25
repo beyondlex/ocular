@@ -141,6 +141,11 @@ fn split_addr(addr: &str) -> (String, String) {
     }
 }
 
+struct GroupPicker {
+    groups: Vec<String>,
+    selected: usize,
+}
+
 struct App {
     events: Vec<ProxyEvent>,
     selected: usize,
@@ -171,6 +176,11 @@ struct App {
     info_popup_idx: Option<usize>,
     component_filter: String,
     config_path: PathBuf,
+    // Group state
+    group_dir: Option<PathBuf>,
+    active_group: Option<String>,
+    group_picker: Option<GroupPicker>,
+    proxy_change_tx: Option<broadcast::Sender<ProxyChange>>,
 }
 
 fn filtered_component_indices(app: &App) -> Vec<usize> {
@@ -328,6 +338,7 @@ struct ReloadableExclude {
 pub enum ProxyChange {
     Added(ComponentInfo),
     Removed(String),
+    SwitchGroup(PathBuf), // new group file path — main.rs kills all and reloads from this file
 }
 
 pub async fn run(
@@ -339,6 +350,9 @@ pub async fn run(
     show_leader_menu: bool,
     quit_confirm: bool,
     proxy_change_rx: Option<broadcast::Receiver<ProxyChange>>,
+    group_dir: Option<PathBuf>,
+    active_group: Option<String>,
+    proxy_change_tx: Option<broadcast::Sender<ProxyChange>>,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -380,6 +394,10 @@ pub async fn run(
         info_popup_idx: None,
         component_filter: String::new(),
         config_path: config_path.clone(),
+        group_dir,
+        active_group,
+        group_picker: None,
+        proxy_change_tx,
     };
 
     let mut last_mtime = SystemTime::UNIX_EPOCH;
@@ -417,13 +435,13 @@ pub async fn run(
                     ProxyChange::Removed(name) => {
                         app.components.retain(|c| c.name != name);
                         app.exclude_matchers.remove(&name);
-                        // Reset component selection if it was pointing to removed
                         if let Some(idx) = app.component_idx {
                             if idx >= app.components.len() {
                                 app.component_idx = None;
                             }
                         }
                     }
+                    ProxyChange::SwitchGroup(_) => {} // handled by main.rs watcher
                 }
             }
         }
@@ -452,6 +470,58 @@ pub async fn run(
                 // Ctrl+C: force quit regardless of state
                 if key.code == KeyCode::Char('c') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
                     break;
+                }
+
+                // Group picker handling
+                if let Some(ref mut picker) = app.group_picker {
+                    match key.code {
+                        KeyCode::Esc => { app.group_picker = None; }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if picker.selected + 1 < picker.groups.len() { picker.selected += 1; }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            picker.selected = picker.selected.saturating_sub(1);
+                        }
+                        KeyCode::Enter => {
+                            let group_name = picker.groups[picker.selected].clone();
+                            app.group_picker = None;
+                            if let Some(ref gdir) = app.group_dir {
+                                // "default" maps to main config (parent of group dir)
+                                let group_file = if group_name == "default" {
+                                    gdir.parent().unwrap_or(gdir.as_path()).join("ocular.toml")
+                                } else {
+                                    gdir.join(format!("{}.toml", group_name))
+                                };
+                                if group_file.exists() {
+                                    if let Ok(content) = std::fs::read_to_string(&group_file) {
+                                        if let Ok(cfg) = toml::from_str::<ReloadableConfig>(&content) {
+                                            app.components.clear();
+                                            app.exclude_matchers.clear();
+                                            app.component_idx = None;
+                                            app.events.clear();
+                                            app.selected = 0;
+                                            for p in &cfg.proxy {
+                                                let ci = ComponentInfo {
+                                                    name: p.name.clone(),
+                                                    listen: p.listen.clone(),
+                                                    exclude: None,
+                                                    include: None,
+                                                };
+                                                app.components.push(ci);
+                                            }
+                                            app.active_group = Some(group_name);
+                                            app.config_path = group_file.clone();
+                                            if let Some(ref tx) = app.proxy_change_tx {
+                                                let _ = tx.send(ProxyChange::SwitchGroup(group_file));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
                 }
 
                 // Proxy form handling (6 fields: name, protocol, listen_host, listen_port, remote_host, remote_port)
@@ -643,6 +713,27 @@ pub async fn run(
                             stdout().execute(EnterAlternateScreen)?;
                             enable_raw_mode()?;
                             terminal.clear()?;
+                        }
+                        KeyCode::Char('e') => {
+                            // Open group picker
+                            if let Some(ref gdir) = app.group_dir {
+                                let mut groups: Vec<String> = vec!["default".to_string()];
+                                if let Ok(entries) = std::fs::read_dir(gdir) {
+                                    for entry in entries.flatten() {
+                                        let path = entry.path();
+                                        if path.extension().is_some_and(|e| e == "toml") {
+                                            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                                                groups.push(stem.to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                                groups[1..].sort();
+                                let selected = app.active_group.as_ref()
+                                    .and_then(|ag| groups.iter().position(|g| g == ag))
+                                    .unwrap_or(0);
+                                app.group_picker = Some(GroupPicker { groups, selected });
+                            }
                         }
                         _ => {}
                     }
@@ -1004,15 +1095,32 @@ fn ui(f: &mut Frame, app: &mut App) {
     let comp_focused = app.focus == Focus::Components || app.focus == Focus::ComponentFilter;
     let fuzzy = SkimMatcherV2::default();
     let filter_active = !app.component_filter.is_empty();
-    let items: Vec<ListItem> = if filter_active {
-        // Filter indicator + filtered components
-        let mut result: Vec<ListItem> = vec![
-            ListItem::new(Line::from(Span::styled(
-                format!(" (filter: {})", app.component_filter),
-                Style::default().fg(Color::Rgb(255, 165, 0)),
-            ))),
-        ];
-        result.extend(app.components.iter().enumerate().filter(|(_, c)| {
+
+    // Build "ALL" row with group name
+    let all_label: Line = if let Some(ref group) = app.active_group {
+        Line::from(vec![
+            Span::raw(if app.component_idx.is_none() { " ● All " } else { "   All " }),
+            Span::styled(format!("[{}]", group), Style::default().fg(Color::DarkGray)),
+        ])
+    } else {
+        Line::from(if app.component_idx.is_none() { " ● All" } else { "   All" })
+    };
+    let all_style = if app.component_idx.is_none() && comp_focused {
+        Style::default().bg(Color::DarkGray).fg(Color::White)
+    } else if app.component_idx.is_none() {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    };
+
+    let mut items: Vec<ListItem> = vec![ListItem::new(all_label).style(all_style)];
+
+    if filter_active {
+        items.push(ListItem::new(Line::from(Span::styled(
+            format!(" (filter: {})", app.component_filter),
+            Style::default().fg(Color::Rgb(255, 165, 0)),
+        ))));
+        items.extend(app.components.iter().enumerate().filter(|(_, c)| {
             let target = format!("{} {} {}", c.name, c.listen, c.listen);
             fuzzy.fuzzy_match(&target, &app.component_filter).is_some()
         }).map(|(i, c)| {
@@ -1025,26 +1133,15 @@ fn ui(f: &mut Frame, app: &mut App) {
             } else {
                 Style::default()
             };
-            let addr_style = Style::default().fg(Color::Rgb(100, 100, 100));
             let count = app.events.iter().filter(|ev| ev.component == c.name).count();
+            let count_style = if count > 0 { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{} {}", prefix, c.name), style),
-                Span::styled(format!(" {}", count), addr_style),
-                Span::styled(format!(" ({})", c.listen), addr_style),
+                Span::styled(format!(" {}", count), count_style),
             ])).style(style)
         }));
-        result
     } else {
-        std::iter::once(ListItem::new(
-            if app.component_idx.is_none() { " ● ALL".to_string() } else { "   ALL".to_string() }
-        ).style(if app.component_idx.is_none() && comp_focused {
-            Style::default().bg(Color::DarkGray).fg(Color::White)
-        } else if app.component_idx.is_none() {
-            Style::default().fg(Color::Cyan)
-        } else {
-            Style::default()
-        }))
-        .chain(app.components.iter().enumerate().map(|(i, c)| {
+        items.extend(app.components.iter().enumerate().map(|(i, c)| {
             let selected = app.component_idx == Some(i);
             let prefix = if selected { " ●" } else { "  " };
             let style = if selected && comp_focused {
@@ -1054,28 +1151,37 @@ fn ui(f: &mut Frame, app: &mut App) {
             } else {
                 Style::default()
             };
-            let addr_style = if selected && comp_focused {
-                Style::default().bg(Color::DarkGray).fg(Color::Rgb(160, 160, 160))
-            } else {
-                Style::default().fg(Color::Rgb(100, 100, 100))
-            };
             let count = app.events.iter().filter(|ev| ev.component == c.name).count();
+            let count_style = if count > 0 { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) };
             ListItem::new(Line::from(vec![
                 Span::styled(format!("{} {}", prefix, c.name), style),
-                Span::styled(format!(" {}", count), addr_style),
-                Span::styled(format!(" ({})", c.listen), addr_style),
+                Span::styled(format!(" {}", count), count_style),
             ])).style(style)
-        })).collect()
+        }));
     };
-    let comp_title = if app.focus == Focus::ComponentFilter {
-        format!(" /{}▌", app.component_filter)
-    } else {
-        format!(" Ocular v{} ", env!("CARGO_PKG_VERSION"))
-    };
+
+    let comp_title = format!(" Ocular v{} ", env!("CARGO_PKG_VERSION"));
     let comp_border = if comp_focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
-    let left = List::new(items)
-        .block(Block::default().borders(Borders::TOP).border_style(comp_border).title(comp_title));
-    f.render_widget(left, chunks[0]);
+
+    // Split component area: list + optional filter input at bottom
+    if app.focus == Focus::ComponentFilter {
+        let comp_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(chunks[0]);
+        let left = List::new(items)
+            .block(Block::default().borders(Borders::TOP).border_style(comp_border).title(comp_title));
+        f.render_widget(left, comp_chunks[0]);
+        let filter_line = Paragraph::new(Line::from(Span::styled(
+            format!(" /{}▌", app.component_filter),
+            Style::default().fg(Color::Rgb(255, 165, 0)),
+        )));
+        f.render_widget(filter_line, comp_chunks[1]);
+    } else {
+        let left = List::new(items)
+            .block(Block::default().borders(Borders::TOP).border_style(comp_border).title(comp_title));
+        f.render_widget(left, chunks[0]);
+    }
 
     // Right: vertical split
     let right = Layout::default()
@@ -1377,6 +1483,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from(vec![Span::styled(" f", Style::default().fg(Color::Cyan)), Span::raw("  → Toggle follow (tail -f)")]),
             Line::from(vec![Span::styled(" p", Style::default().fg(Color::Cyan)), Span::raw("  → Pause/resume stream")]),
             Line::from(vec![Span::styled(" ,", Style::default().fg(Color::Cyan)), Span::raw("  → Edit config")]),
+            Line::from(vec![Span::styled(" e", Style::default().fg(Color::Cyan)), Span::raw("  → Switch group")]),
             Line::from(""),
             Line::from(Span::styled(" Esc/any  → cancel", Style::default().fg(Color::DarkGray))),
         ];
@@ -1602,6 +1709,35 @@ fn ui(f: &mut Frame, app: &mut App) {
                     .title(" Proxy Info (i to close) "));
             f.render_widget(popup, popup_area);
         }
+    }
+
+    // Group picker popup
+    if let Some(ref picker) = app.group_picker {
+        let area = f.area();
+        let h = (picker.groups.len() as u16 + 2).min(area.height - 4);
+        let w: u16 = 30;
+        let x = (area.width.saturating_sub(w)) / 2;
+        let y = (area.height.saturating_sub(h)) / 2;
+        let popup_area = Rect::new(x, y, w, h);
+        f.render_widget(Clear, popup_area);
+        let items: Vec<ListItem> = picker.groups.iter().enumerate().map(|(i, g)| {
+            let is_active = app.active_group.as_deref() == Some(g.as_str());
+            let prefix = if i == picker.selected { " ●" } else { "  " };
+            let suffix = if is_active { " ✓" } else { "" };
+            let style = if i == picker.selected {
+                Style::default().bg(Color::DarkGray).fg(Color::White)
+            } else if is_active {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            ListItem::new(format!("{} {}{}", prefix, g, suffix)).style(style)
+        }).collect();
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Rgb(255, 165, 0)))
+                .title(" Switch Group (j/k, Enter) "));
+        f.render_widget(list, popup_area);
     }
 }
 
