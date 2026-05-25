@@ -251,6 +251,13 @@ struct ReloadableExclude {
     regex: bool,
 }
 
+/// Notification sent to TUI when proxies change via hot-reload
+#[derive(Debug, Clone)]
+pub enum ProxyChange {
+    Added(ComponentInfo),
+    Removed(String),
+}
+
 pub async fn run(
     mut rx: broadcast::Receiver<ProxyEvent>,
     components: Vec<ComponentInfo>,
@@ -259,6 +266,7 @@ pub async fn run(
     event_format: Option<String>,
     show_leader_menu: bool,
     quit_confirm: bool,
+    proxy_change_rx: Option<broadcast::Receiver<ProxyChange>>,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -298,6 +306,7 @@ pub async fn run(
     };
 
     let mut last_mtime = SystemTime::UNIX_EPOCH;
+    let mut proxy_change_rx = proxy_change_rx;
 
     loop {
         // Hot-reload config on file change
@@ -308,6 +317,34 @@ pub async fn run(
                     if let Ok(content) = std::fs::read_to_string(&config_path) {
                         if let Ok(cfg) = toml::from_str::<ReloadableConfig>(&content) {
                             reload_config(&mut app, &cfg);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Handle proxy hot-reload notifications
+        if let Some(ref mut prx) = proxy_change_rx {
+            while let Ok(change) = prx.try_recv() {
+                match change {
+                    ProxyChange::Added(ci) => {
+                        if !app.components.iter().any(|c| c.name == ci.name) {
+                            let matcher = ExcludeMatcher::new(ci.exclude.as_ref(), ci.include.as_ref());
+                            if matcher.excludes.is_empty() && matcher.includes.is_empty() {
+                            } else {
+                                app.exclude_matchers.insert(ci.name.clone(), matcher);
+                            }
+                            app.components.push(ci);
+                        }
+                    }
+                    ProxyChange::Removed(name) => {
+                        app.components.retain(|c| c.name != name);
+                        app.exclude_matchers.remove(&name);
+                        // Reset component selection if it was pointing to removed
+                        if let Some(idx) = app.component_idx {
+                            if idx >= app.components.len() {
+                                app.component_idx = None;
+                            }
                         }
                     }
                 }

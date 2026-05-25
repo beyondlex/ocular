@@ -23,25 +23,35 @@ pub async fn run_proxy(
     name: String,
     protocol: Protocol,
     tx: broadcast::Sender<ProxyEvent>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<()> {
     let listener = TcpListener::bind(&listen_addr).await?;
     info!(component = %name, listen = %listen_addr, remote = %remote_addr, ?protocol, "proxy listening");
 
     loop {
-        let (client, peer) = listener.accept().await?;
-        debug!(component = %name, peer = %peer, "new client connection");
-        let remote = remote_addr.clone();
-        let name = name.clone();
-        let tx = tx.clone();
-        let process = resolve_peer_process(peer.port());
-        let peer_addr = peer.to_string();
-        let remote_for_conn = remote.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_conn(client, &remote, &name, protocol, &tx, process, peer_addr, remote_for_conn).await {
-                warn!(component = %name, remote = %remote, error = %e, "connection ended with error");
+        tokio::select! {
+            result = listener.accept() => {
+                let (client, peer) = result?;
+                debug!(component = %name, peer = %peer, "new client connection");
+                let remote = remote_addr.clone();
+                let name = name.clone();
+                let tx = tx.clone();
+                let process = resolve_peer_process(peer.port());
+                let peer_addr = peer.to_string();
+                let remote_for_conn = remote.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_conn(client, &remote, &name, protocol, &tx, process, peer_addr, remote_for_conn).await {
+                        warn!(component = %name, remote = %remote, error = %e, "connection ended with error");
+                    }
+                });
             }
-        });
+            _ = shutdown.changed() => {
+                info!(component = %name, "proxy shutting down");
+                break;
+            }
+        }
     }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
