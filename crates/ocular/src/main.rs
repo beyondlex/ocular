@@ -212,7 +212,7 @@ async fn main() -> Result<()> {
         let components = demo::demo_components();
         let theme = ocular_tui::Theme::by_name("tokyo-night-storm");
         let config_path = PathBuf::from("ocular.toml");
-        return ocular_tui::run(rx, components, theme, config_path, None, true, false, None, None, None, None).await;
+        return ocular_tui::run(rx, components, theme, config_path.clone(), None, true, false, None, None, None, None, config_path).await;
     }
 
     let (config, config_dir, config_path) = load_config()?;
@@ -259,15 +259,11 @@ async fn main() -> Result<()> {
     let (tx, _) = broadcast::channel::<ocular_proxy::ProxyEvent>(1024);
     let (proxy_change_tx, proxy_change_rx) = broadcast::channel::<ProxyChange>(64);
 
-    // Spawn initial proxies
-    let mut proxy_handles: HashMap<String, ProxyHandle> = HashMap::new();
-    for proxy_cfg in &active_proxies {
-        let ph = spawn_proxy(proxy_cfg, &tx);
-        proxy_handles.insert(proxy_cfg.name.clone(), ph);
-    }
+    // Don't spawn proxies at startup — wait for user to select a group in Dashboard
+    let proxy_handles: HashMap<String, ProxyHandle> = HashMap::new();
 
     // Proxy hot-reload watcher task
-    let config_path_watch = active_config_path.clone();
+    let _config_path_watch = active_config_path.clone();
     let tx_reload = tx.clone();
     let proxy_change_tx_clone = proxy_change_tx.clone();
     let initial_excludes = config.exclude.clone();
@@ -277,19 +273,20 @@ async fn main() -> Result<()> {
         let mut handles = proxy_handles;
         #[allow(unused_assignments)]
         let mut global_excludes: std::collections::HashMap<String, ExcludeConfig> = initial_excludes;
-        let mut watch_path = config_path_watch;
+        let mut watch_path: Option<PathBuf> = None; // No watching until a group is loaded
         let mut change_rx = proxy_change_tx_clone.subscribe();
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
-                    let mtime = match std::fs::metadata(&watch_path).and_then(|m| m.modified()) {
+                    let Some(ref wp) = watch_path else { continue };
+                    let mtime = match std::fs::metadata(wp).and_then(|m| m.modified()) {
                         Ok(t) => t,
                         Err(_) => continue,
                     };
                     if mtime == last_mtime { continue; }
                     last_mtime = mtime;
 
-                    let content = match std::fs::read_to_string(&watch_path) {
+                    let content = match std::fs::read_to_string(wp) {
                         Ok(c) => c,
                         Err(_) => continue,
                     };
@@ -305,24 +302,32 @@ async fn main() -> Result<()> {
                     apply_proxy_diff(&mut handles, &new_config.proxy, &tx_reload, &proxy_change_tx_clone, &global_excludes);
                 }
                 Ok(change) = change_rx.recv() => {
-                    if let ProxyChange::SwitchGroup(new_path) = change {
-                        // Kill all existing proxies
-                        for (name, ph) in handles.drain() {
-                            let _ = ph.shutdown_tx.send(true);
-                            info!(component = %name, "proxy stopped for group switch");
-                        }
-                        // Load new group file
-                        watch_path = new_path;
-                        last_mtime = SystemTime::UNIX_EPOCH; // force reload on next tick
-                        if let Ok(content) = std::fs::read_to_string(&watch_path) {
-                            if let Ok(new_config) = toml::from_str::<Config>(&content) {
-                                for proxy_cfg in &new_config.proxy {
-                                    let ph = spawn_proxy(proxy_cfg, &tx_reload);
-                                    handles.insert(proxy_cfg.name.clone(), ph);
-                                    info!(component = %proxy_cfg.name, "proxy started for group switch");
+                    match change {
+                        ProxyChange::SwitchGroup(new_path) => {
+                            for (name, ph) in handles.drain() {
+                                let _ = ph.shutdown_tx.send(true);
+                                info!(component = %name, "proxy stopped for group switch");
+                            }
+                            watch_path = Some(new_path.clone());
+                            last_mtime = SystemTime::UNIX_EPOCH;
+                            if let Ok(content) = std::fs::read_to_string(&new_path) {
+                                if let Ok(new_config) = toml::from_str::<Config>(&content) {
+                                    for proxy_cfg in &new_config.proxy {
+                                        let ph = spawn_proxy(proxy_cfg, &tx_reload);
+                                        handles.insert(proxy_cfg.name.clone(), ph);
+                                        info!(component = %proxy_cfg.name, "proxy started for group switch");
+                                    }
                                 }
                             }
                         }
+                        ProxyChange::StopAll => {
+                            for (name, ph) in handles.drain() {
+                                let _ = ph.shutdown_tx.send(true);
+                                info!(component = %name, "proxy stopped (StopAll)");
+                            }
+                            watch_path = None;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -386,5 +391,5 @@ async fn main() -> Result<()> {
         base_theme
     };
 
-    ocular_tui::run(rx, components, theme, active_config_path, config.event_format, config.leader_menu, config.quit_confirm, Some(proxy_change_rx), Some(group_dir), active_group, Some(proxy_change_tx)).await
+    ocular_tui::run(rx, components, theme, active_config_path, config.event_format, config.leader_menu, config.quit_confirm, Some(proxy_change_rx), Some(group_dir), active_group, Some(proxy_change_tx), config_path).await
 }

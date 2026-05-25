@@ -98,6 +98,11 @@ Ocular runs lightweight TCP proxies between your application and middleware. Tra
 - **Open in $EDITOR** — `e` opens selected commands in vim/nvim
 - **Leader menu** — `Space` opens a command palette
 - **Hot-reload config** — change theme, format, filters without restarting
+- **Hot-reload proxies** — add/remove/modify `[[proxy]]` entries without restarting
+- **Dashboard** — landing page to select and manage proxy groups before connecting
+- **Proxy Groups** — organize proxies by environment (dev, test, prod), switch instantly
+- **Proxy CRUD** — create, edit, delete, inspect proxies from the component pane (`n/e/d/i`)
+- **Component filter** — fuzzy search proxies in the component pane (`/`)
 - **Demo mode** — `--demo` generates simulated traffic for instant preview
 
 ## Supported Protocols
@@ -130,6 +135,40 @@ Ocular runs lightweight TCP proxies between your application and middleware. Tra
 | `e` | Open selected command(s) in `$EDITOR` |
 | `Space` | Open leader menu |
 | `?` | Help popup |
+| `q` | Back to dashboard |
+
+### Leader Menu (`Space` + key)
+
+| Key | Action |
+|-----|--------|
+| `h/j/k/l` | Switch panel focus |
+| `c` | Clear all events |
+| `f` | Toggle follow (tail -f) |
+| `p` | Pause/resume event stream |
+| `g` | Switch proxy group |
+| `,` | Open config in `$EDITOR` |
+
+### Component Pane
+
+| Key | Action |
+|-----|--------|
+| `n` | Create new proxy |
+| `e` | Edit selected proxy |
+| `d` | Delete selected proxy |
+| `i` | Inspect proxy details |
+| `/` | Filter proxies (fuzzy search) |
+
+### Dashboard
+
+| Key | Action |
+|-----|--------|
+| `j` / `k` | Navigate groups |
+| `Enter` | Load group and connect |
+| `n` | Create new group |
+| `r` | Rename group |
+| `e` | Edit group file in `$EDITOR` |
+| `d` | Delete group |
+| `/` | Filter groups |
 | `q` | Quit |
 
 ## Configuration
@@ -157,6 +196,25 @@ remote = "127.0.0.1:6380"
 ```
 
 ## Event Filtering (Exclude / Include)
+## Proxy Groups
+
+Organize proxies by environment. Groups are stored as separate files in the config directory:
+
+```
+~/.config/ocular/
+├── ocular.toml          # Main config (theme, event_format, exclude rules)
+└── group/
+    ├── dev.toml         # Development proxies
+    ├── test.toml        # Test environment
+    └── prod.toml        # Production (read-only monitoring)
+```
+
+Each group file uses the same `[[proxy]]` format. Proxies defined in `ocular.toml` are treated as the "default" group.
+
+On startup, Ocular shows a **Dashboard** where you select which group to load. You can also switch groups at any time with `Space` → `g`.
+
+Creating a new group from the dashboard (`n`) walks you through naming the group and adding proxies interactively.
+
 
 Hide noisy events from the Events panel using `exclude` rules. Use `include` to override excludes and force specific events to remain visible.
 

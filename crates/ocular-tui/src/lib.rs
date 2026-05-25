@@ -92,6 +92,86 @@ impl ExcludeMatcher {
 #[derive(PartialEq, Clone, Copy)]
 enum Focus { Components, Events, Detail, Filter, ComponentFilter }
 
+#[derive(PartialEq, Clone)]
+enum AppMode {
+    Dashboard,
+    NewGroupName,
+    NewGroupAddProxy,
+    RenameGroup,
+    Main,
+}
+
+struct DashboardState {
+    groups: Vec<DashboardGroup>,
+    selected: usize,
+    filter: String,
+    filter_active: bool,
+    new_group_name: String,
+    new_group_proxies: Vec<NewProxyEntry>,
+    error: Option<String>,
+    rename_input: String,
+    delete_confirm: bool,
+}
+
+#[derive(Clone)]
+struct DashboardGroup {
+    name: String,
+    proxies: Vec<String>, // proxy names for display
+}
+
+#[derive(Clone)]
+struct NewProxyEntry {
+    name: String,
+    protocol: String,
+    listen: String,
+    remote: String,
+}
+
+impl DashboardState {
+    fn load(group_dir: &std::path::Path, main_config: &std::path::Path) -> Self {
+        let mut groups = Vec::new();
+        // "default" from main config
+        if let Ok(content) = std::fs::read_to_string(main_config) {
+            if let Ok(cfg) = toml::from_str::<ReloadableConfig>(&content) {
+                if !cfg.proxy.is_empty() {
+                    groups.push(DashboardGroup {
+                        name: "default".to_string(),
+                        proxies: cfg.proxy.iter().map(|p| p.name.clone()).collect(),
+                    });
+                }
+            }
+        }
+        // Groups from group dir
+        if let Ok(entries) = std::fs::read_dir(group_dir) {
+            let mut group_files: Vec<_> = entries.flatten()
+                .filter(|e| e.path().extension().is_some_and(|ext| ext == "toml"))
+                .collect();
+            group_files.sort_by_key(|e| e.file_name());
+            for entry in group_files {
+                let path = entry.path();
+                let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                let proxies = std::fs::read_to_string(&path).ok()
+                    .and_then(|c| toml::from_str::<ReloadableConfig>(&c).ok())
+                    .map(|cfg| cfg.proxy.iter().map(|p| p.name.clone()).collect())
+                    .unwrap_or_default();
+                groups.push(DashboardGroup { name, proxies });
+            }
+        }
+        Self { groups, selected: 0, filter: String::new(), filter_active: false, new_group_name: String::new(), new_group_proxies: Vec::new(), error: None, rename_input: String::new(), delete_confirm: false }
+    }
+
+    fn filtered_indices(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            (0..self.groups.len()).collect()
+        } else {
+            let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+            self.groups.iter().enumerate().filter(|(_, g)| {
+                matcher.fuzzy_match(&g.name, &self.filter).is_some()
+            }).map(|(i, _)| i).collect()
+        }
+    }
+}
+
 const PROTOCOLS: &[&str] = &["redis", "mysql", "postgres", "amqp", "mongodb", "http", "memcached", "kafka"];
 
 fn default_port(protocol: &str) -> &'static str {
@@ -181,6 +261,10 @@ struct App {
     active_group: Option<String>,
     group_picker: Option<GroupPicker>,
     proxy_change_tx: Option<broadcast::Sender<ProxyChange>>,
+    // Mode state
+    mode: AppMode,
+    dashboard: DashboardState,
+    main_config_path: PathBuf,
 }
 
 fn filtered_component_indices(app: &App) -> Vec<usize> {
@@ -338,7 +422,8 @@ struct ReloadableExclude {
 pub enum ProxyChange {
     Added(ComponentInfo),
     Removed(String),
-    SwitchGroup(PathBuf), // new group file path — main.rs kills all and reloads from this file
+    SwitchGroup(PathBuf),
+    StopAll,
 }
 
 pub async fn run(
@@ -353,6 +438,7 @@ pub async fn run(
     group_dir: Option<PathBuf>,
     active_group: Option<String>,
     proxy_change_tx: Option<broadcast::Sender<ProxyChange>>,
+    main_config_path: PathBuf,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -364,13 +450,14 @@ pub async fn run(
         .collect();
 
     let fmt = event_format.as_deref().map(EventFormat::parse).unwrap_or_else(EventFormat::default_format);
+    let app_group_dir = group_dir.clone();
 
     let mut app = App {
         events: Vec::new(),
         selected: 0,
         detail_scroll: 0,
         focus: Focus::Events,
-        components,
+        components: Vec::new(), // empty — populated when user selects a group
         component_idx: None,
         filter: String::new(),
         pending_keys: String::new(),
@@ -398,12 +485,278 @@ pub async fn run(
         active_group,
         group_picker: None,
         proxy_change_tx,
+        mode: AppMode::Dashboard,
+        dashboard: DashboardState::load(
+            app_group_dir.as_deref().unwrap_or(std::path::Path::new("")),
+            &main_config_path,
+        ),
+        main_config_path: main_config_path.clone(),
     };
 
     let mut last_mtime = SystemTime::UNIX_EPOCH;
     let mut proxy_change_rx = proxy_change_rx;
 
     loop {
+        // Dashboard / NewGroup modes
+        if app.mode != AppMode::Main {
+            terminal.draw(|f| ui_dashboard(f, &app))?;
+
+            if event::poll(Duration::from_millis(50))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind != KeyEventKind::Press { continue; }
+                    if key.code == KeyCode::Char('c') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                        break;
+                    }
+                    match &app.mode {
+                        AppMode::Dashboard => {
+                            if app.dashboard.delete_confirm {
+                                match key.code {
+                                    KeyCode::Char('y') | KeyCode::Enter => {
+                                        if let Some(g) = app.dashboard.groups.get(app.dashboard.selected) {
+                                            if let Some(ref gdir) = app.group_dir.clone() {
+                                                let file = gdir.join(format!("{}.toml", g.name));
+                                                let _ = std::fs::remove_file(&file);
+                                                app.dashboard = DashboardState::load(&gdir, &app.main_config_path);
+                                                if app.dashboard.selected >= app.dashboard.groups.len() {
+                                                    app.dashboard.selected = app.dashboard.groups.len().saturating_sub(1);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    _ => { app.dashboard.delete_confirm = false; }
+                                }
+                                app.dashboard.delete_confirm = false;
+                                continue;
+                            }
+                            if app.dashboard.filter_active {
+                                match key.code {
+                                    KeyCode::Esc => { app.dashboard.filter.clear(); app.dashboard.filter_active = false; }
+                                    KeyCode::Enter => { app.dashboard.filter_active = false; }
+                                    KeyCode::Backspace => { app.dashboard.filter.pop(); }
+                                    KeyCode::Char(c) => { app.dashboard.filter.push(c); }
+                                    _ => {}
+                                }
+                                continue;
+                            }
+                            match key.code {
+                                KeyCode::Char('q') => break,
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    let visible = app.dashboard.filtered_indices();
+                                    if let Some(pos) = visible.iter().position(|&i| i == app.dashboard.selected) {
+                                        if pos + 1 < visible.len() { app.dashboard.selected = visible[pos + 1]; }
+                                    } else if !visible.is_empty() {
+                                        app.dashboard.selected = visible[0];
+                                    }
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    let visible = app.dashboard.filtered_indices();
+                                    if let Some(pos) = visible.iter().position(|&i| i == app.dashboard.selected) {
+                                        if pos > 0 { app.dashboard.selected = visible[pos - 1]; }
+                                    } else if !visible.is_empty() {
+                                        app.dashboard.selected = *visible.last().unwrap();
+                                    }
+                                }
+                                KeyCode::Char('/') => { app.dashboard.filter_active = true; }
+                                KeyCode::Char('n') => {
+                                    app.dashboard.new_group_name.clear();
+                                    app.dashboard.new_group_proxies.clear();
+                                    app.dashboard.error = None;
+                                    app.mode = AppMode::NewGroupName;
+                                }
+                                KeyCode::Char('e') => {
+                                    if let Some(g) = app.dashboard.groups.get(app.dashboard.selected) {
+                                        if let Some(ref gdir) = app.group_dir {
+                                            let file = if g.name == "default" {
+                                                app.main_config_path.clone()
+                                            } else {
+                                                gdir.join(format!("{}.toml", g.name))
+                                            };
+                                            disable_raw_mode()?;
+                                            stdout().execute(LeaveAlternateScreen)?;
+                                            let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+                                            let _ = std::process::Command::new(&editor).arg(&file).status();
+                                            stdout().execute(EnterAlternateScreen)?;
+                                            enable_raw_mode()?;
+                                            terminal.clear()?;
+                                            // Reload dashboard
+                                            app.dashboard = DashboardState::load(gdir, &app.main_config_path);
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('d') => {
+                                    if let Some(g) = app.dashboard.groups.get(app.dashboard.selected) {
+                                        if g.name != "default" {
+                                            app.dashboard.delete_confirm = true;
+                                        }
+                                    }
+                                }
+                                KeyCode::Char('r') => {
+                                    if let Some(g) = app.dashboard.groups.get(app.dashboard.selected) {
+                                        if g.name != "default" {
+                                            app.dashboard.rename_input = g.name.clone();
+                                            app.dashboard.error = None;
+                                            app.mode = AppMode::RenameGroup;
+                                        }
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(g) = app.dashboard.groups.get(app.dashboard.selected).cloned() {
+                                        if let Some(ref gdir) = app.group_dir.clone() {
+                                            let group_file = if g.name == "default" {
+                                                app.main_config_path.clone()
+                                            } else {
+                                                gdir.join(format!("{}.toml", g.name))
+                                            };
+                                            if let Ok(content) = std::fs::read_to_string(&group_file) {
+                                                if let Ok(cfg) = toml::from_str::<ReloadableConfig>(&content) {
+                                                    app.components.clear();
+                                                    app.exclude_matchers.clear();
+                                                    app.component_idx = None;
+                                                    app.events.clear();
+                                                    app.selected = 0;
+                                                    for p in &cfg.proxy {
+                                                        app.components.push(ComponentInfo {
+                                                            name: p.name.clone(),
+                                                            listen: p.listen.clone(),
+                                                            exclude: None, include: None,
+                                                        });
+                                                    }
+                                                    app.active_group = Some(g.name.clone());
+                                                    app.config_path = group_file.clone();
+                                                    if let Some(ref tx) = app.proxy_change_tx {
+                                                        let _ = tx.send(ProxyChange::SwitchGroup(group_file));
+                                                    }
+                                                    app.mode = AppMode::Main;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        AppMode::NewGroupName => {
+                            match key.code {
+                                KeyCode::Esc => { app.mode = AppMode::Dashboard; }
+                                KeyCode::Enter => {
+                                    let name = app.dashboard.new_group_name.trim().to_string();
+                                    if name.is_empty() {
+                                        app.dashboard.error = Some("group name is required".into());
+                                    } else if app.dashboard.groups.iter().any(|g| g.name == name) {
+                                        app.dashboard.error = Some(format!("group \"{}\" already exists", name));
+                                    } else {
+                                        app.dashboard.error = None;
+                                        app.mode = AppMode::NewGroupAddProxy;
+                                    }
+                                }
+                                KeyCode::Backspace => { app.dashboard.new_group_name.pop(); app.dashboard.error = None; }
+                                KeyCode::Char(c) => { app.dashboard.new_group_name.push(c); app.dashboard.error = None; }
+                                _ => {}
+                            }
+                        }
+                        AppMode::NewGroupAddProxy => {
+                            // Reuse proxy form logic inline
+                            if app.proxy_form.is_none() {
+                                // Show proxy list with option to add more or finish
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        // Save group and go back to dashboard
+                                        if let Some(ref gdir) = app.group_dir.clone() {
+                                            let name = &app.dashboard.new_group_name;
+                                            let file = gdir.join(format!("{}.toml", name));
+                                            let mut content = String::new();
+                                            for p in &app.dashboard.new_group_proxies {
+                                                content.push_str(&format!("[[proxy]]\nname = \"{}\"\nprotocol = \"{}\"\nlisten = \"{}\"\nremote = \"{}\"\n\n", p.name, p.protocol, p.listen, p.remote));
+                                            }
+                                            let _ = std::fs::write(&file, content);
+                                            app.dashboard = DashboardState::load(gdir, &app.main_config_path);
+                                        }
+                                        app.mode = AppMode::Dashboard;
+                                    }
+                                    KeyCode::Char('n') | KeyCode::Enter => {
+                                        app.proxy_form = Some(ProxyForm::default());
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                // Proxy form active
+                                if let Some(ref mut form) = app.proxy_form {
+                                    match key.code {
+                                        KeyCode::Esc => { app.proxy_form = None; }
+                                        KeyCode::Tab => { form.active_field = (form.active_field + 1) % 6; form.error = None; }
+                                        KeyCode::BackTab => { form.active_field = (form.active_field + 5) % 6; form.error = None; }
+                                        KeyCode::Enter => {
+                                            let protocol = PROTOCOLS[form.protocol_idx];
+                                            let name = form.fields[0].trim().to_string();
+                                            let listen_host = if form.fields[2].is_empty() { "127.0.0.1" } else { form.fields[2].trim() };
+                                            let listen_port = form.fields[3].trim();
+                                            let remote_host = if form.fields[4].is_empty() { "127.0.0.1" } else { form.fields[4].trim() };
+                                            let remote_port = if form.fields[5].is_empty() { default_port(protocol) } else { form.fields[5].trim() };
+                                            if name.is_empty() {
+                                                form.error = Some("name is required".into());
+                                            } else if listen_port.is_empty() {
+                                                form.error = Some("listen port is required".into());
+                                            } else if app.dashboard.new_group_proxies.iter().any(|p| p.name == name) {
+                                                form.error = Some(format!("name \"{}\" already exists", name));
+                                            } else {
+                                                let listen = format!("{}:{}", listen_host, listen_port);
+                                                let remote = format!("{}:{}", remote_host, remote_port);
+                                                app.dashboard.new_group_proxies.push(NewProxyEntry {
+                                                    name, protocol: protocol.to_string(), listen, remote,
+                                                });
+                                                app.proxy_form = None;
+                                            }
+                                        }
+                                        KeyCode::Left if form.active_field == 1 => { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
+                                        KeyCode::Right if form.active_field == 1 => { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
+                                        KeyCode::Backspace => {
+                                            if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
+                                            else { form.fields[form.active_field].pop(); }
+                                            form.error = None;
+                                        }
+                                        KeyCode::Char(c) => {
+                                            if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
+                                            else { form.fields[form.active_field].push(c); }
+                                            form.error = None;
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        AppMode::RenameGroup => {
+                            match key.code {
+                                KeyCode::Esc => { app.mode = AppMode::Dashboard; }
+                                KeyCode::Enter => {
+                                    let new_name = app.dashboard.rename_input.trim().to_string();
+                                    if new_name.is_empty() {
+                                        app.dashboard.error = Some("name is required".into());
+                                    } else if app.dashboard.groups.iter().any(|g| g.name == new_name) {
+                                        app.dashboard.error = Some(format!("\"{}\" already exists", new_name));
+                                    } else if let Some(ref gdir) = app.group_dir.clone() {
+                                        let old_name = &app.dashboard.groups[app.dashboard.selected].name;
+                                        let old_file = gdir.join(format!("{}.toml", old_name));
+                                        let new_file = gdir.join(format!("{}.toml", new_name));
+                                        let _ = std::fs::rename(&old_file, &new_file);
+                                        app.dashboard = DashboardState::load(gdir, &app.main_config_path);
+                                        app.mode = AppMode::Dashboard;
+                                    }
+                                }
+                                KeyCode::Backspace => { app.dashboard.rename_input.pop(); app.dashboard.error = None; }
+                                KeyCode::Char(c) => { app.dashboard.rename_input.push(c); app.dashboard.error = None; }
+                                _ => {}
+                            }
+                        }
+                        AppMode::Main => unreachable!(),
+                    }
+                }
+            }
+            // Drain event receiver while in dashboard so stale events don't accumulate
+            while rx.try_recv().is_ok() {}
+            continue;
+        }
+
+        // === Main TUI mode below ===
         // Hot-reload config on file change
         if let Ok(meta) = std::fs::metadata(&config_path) {
             if let Ok(mtime) = meta.modified() {
@@ -441,12 +794,14 @@ pub async fn run(
                             }
                         }
                     }
-                    ProxyChange::SwitchGroup(_) => {} // handled by main.rs watcher
+                    ProxyChange::SwitchGroup(_) | ProxyChange::StopAll => {} // handled by main.rs watcher
                 }
             }
         }
 
         while let Ok(ev) = rx.try_recv() {
+            // Only accept events from components in the current group
+            if !app.components.iter().any(|c| c.name == ev.component) { continue; }
             if let Some(matcher) = app.exclude_matchers.get(&ev.component) {
                 if matcher.is_excluded(&ev.command) { continue; }
             }
@@ -679,7 +1034,16 @@ pub async fn run(
 
                 if app.confirm_quit {
                     match key.code {
-                        KeyCode::Char('y') => break,
+                        KeyCode::Char('y') => {
+                            if let Some(ref tx) = app.proxy_change_tx {
+                                let _ = tx.send(ProxyChange::StopAll);
+                            }
+                            app.mode = AppMode::Dashboard;
+                            app.confirm_quit = false;
+                            if let Some(ref gdir) = app.group_dir.clone() {
+                                app.dashboard = DashboardState::load(gdir, &app.main_config_path);
+                            }
+                        }
                         _ => { app.confirm_quit = false; }
                     }
                     continue;
@@ -714,7 +1078,7 @@ pub async fn run(
                             enable_raw_mode()?;
                             terminal.clear()?;
                         }
-                        KeyCode::Char('e') => {
+                        KeyCode::Char('g') => {
                             // Open group picker
                             if let Some(ref gdir) = app.group_dir {
                                 let mut groups: Vec<String> = vec!["default".to_string()];
@@ -741,7 +1105,18 @@ pub async fn run(
                 }
 
                 match key.code {
-                    KeyCode::Char('q') => { if app.quit_confirm_enabled { app.confirm_quit = true; } else { break; } }
+                    KeyCode::Char('q') => {
+                        if app.quit_confirm_enabled { app.confirm_quit = true; } else {
+                            // Stop all proxies before returning to dashboard
+                            if let Some(ref tx) = app.proxy_change_tx {
+                                let _ = tx.send(ProxyChange::StopAll);
+                            }
+                            app.mode = AppMode::Dashboard;
+                            if let Some(ref gdir) = app.group_dir.clone() {
+                                app.dashboard = DashboardState::load(gdir, &app.main_config_path);
+                            }
+                        }
+                    }
                     KeyCode::Char('?') => { app.help_active = !app.help_active; }
                     KeyCode::Char(' ') => {
                         app.pending_keys.clear();
@@ -1078,6 +1453,265 @@ fn reload_config(app: &mut App, cfg: &ReloadableConfig) {
 
     // Reload fuzzy filter setting
     app.fuzzy_filter = cfg.fuzzy_filter;
+}
+
+fn ui_dashboard(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
+        .split(area);
+
+    let main_area = chunks[0];
+    let box_w: u16 = 52;
+
+    match &app.mode {
+        AppMode::Dashboard => {
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("Ocular ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(Color::DarkGray)),
+            ]).centered());
+            lines.push(Line::from(""));
+
+            let visible = app.dashboard.filtered_indices();
+            let max_visible: usize = 10;
+            let selected_pos = visible.iter().position(|&i| i == app.dashboard.selected).unwrap_or(0);
+            let scroll_start = if selected_pos < max_visible {
+                0
+            } else {
+                selected_pos - max_visible + 1
+            };
+            let visible_window = &visible[scroll_start..visible.len().min(scroll_start + max_visible)];
+
+            for &i in visible_window {
+                let g = &app.dashboard.groups[i];
+                let is_selected = i == app.dashboard.selected;
+                let prefix = if is_selected { " ● " } else { "   " };
+                let proxies_str = if g.proxies.is_empty() {
+                    "(empty)".to_string()
+                } else {
+                    let s = g.proxies.join(", ");
+                    if s.len() > 28 { format!("{}...", &s[..25]) } else { s }
+                };
+                let name_style = if is_selected {
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(prefix, if is_selected { Style::default().fg(Color::Cyan) } else { Style::default() }),
+                    Span::styled(format!("{:<10}", g.name), name_style),
+                    Span::styled(format!(" [{}]", proxies_str), Style::default().fg(Color::DarkGray)),
+                ]));
+            }
+            // Scroll indicator
+            if visible.len() > max_visible {
+                let indicator = format!(" ({}/{})", selected_pos + 1, visible.len());
+                lines.push(Line::from(Span::styled(indicator, Style::default().fg(Color::DarkGray))));
+            }
+
+            if !app.dashboard.filter.is_empty() {
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    format!(" (filter: {})", app.dashboard.filter),
+                    Style::default().fg(Color::Rgb(255, 165, 0)),
+                )));
+            }
+            lines.push(Line::from(""));
+
+            let box_h = lines.len() as u16 + 2;
+            let x = (main_area.width.saturating_sub(box_w)) / 2;
+            let y = (main_area.height.saturating_sub(box_h)) / 2;
+            let box_area = Rect::new(x, y, box_w, box_h);
+            let block = Block::default().borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(Color::DarkGray));
+            let content = Paragraph::new(lines).block(block);
+            f.render_widget(content, box_area);
+
+            // Filter input at bottom of box
+            if app.dashboard.filter_active {
+                let filter_area = Rect::new(x, y + box_h, box_w, 1);
+                let filter_line = Paragraph::new(Line::from(Span::styled(
+                    format!(" /{}", app.dashboard.filter),
+                    Style::default().fg(Color::Rgb(255, 165, 0)),
+                )));
+                f.render_widget(filter_line, filter_area);
+            }
+
+            // Status bar
+            let key_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+            let sep = Style::default().fg(Color::DarkGray);
+            let status = if app.dashboard.filter_active {
+                Line::from(Span::styled(format!(" /{}", app.dashboard.filter), Style::default().fg(Color::Rgb(255, 165, 0))))
+            } else {
+                Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled("n", key_style), Span::raw(" new "),
+                    Span::styled("│", sep), Span::raw(" "),
+                    Span::styled("r", key_style), Span::raw(" rename "),
+                    Span::styled("│", sep), Span::raw(" "),
+                    Span::styled("e", key_style), Span::raw(" edit "),
+                    Span::styled("│", sep), Span::raw(" "),
+                    Span::styled("d", key_style), Span::raw(" delete "),
+                    Span::styled("│", sep), Span::raw(" "),
+                    Span::styled("/", key_style), Span::raw(" filter "),
+                    Span::styled("│", sep), Span::raw(" "),
+                    Span::styled("↵", key_style), Span::raw(" load "),
+                    Span::styled("│", sep), Span::raw(" "),
+                    Span::styled("q", key_style), Span::raw(" quit"),
+                ]).centered()
+            };
+            let status_block = Block::default().borders(Borders::TOP | Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray));
+            let status_inner = status_block.inner(chunks[1]);
+            f.render_widget(status_block, chunks[1]);
+            f.render_widget(Paragraph::new(status), status_inner);
+            // Delete confirm popup
+            if app.dashboard.delete_confirm {
+                if let Some(g) = app.dashboard.groups.get(app.dashboard.selected) {
+                    let w: u16 = 36;
+                    let h: u16 = 5;
+                    let x = (area.width.saturating_sub(w)) / 2;
+                    let y = (area.height.saturating_sub(h)) / 2;
+                    let popup_area = Rect::new(x, y, w, h);
+                    f.render_widget(Clear, popup_area);
+                    let lines = vec![
+                        Line::from(format!(" Delete \"{}\"?", g.name)),
+                        Line::from(""),
+                        Line::from(vec![
+                            Span::raw(" "),
+                            Span::styled("y/Enter", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                            Span::raw(" confirm  "),
+                            Span::styled("n/Esc", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                            Span::raw(" cancel"),
+                        ]),
+                    ];
+                    let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL)
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(Style::default().fg(Color::Yellow))
+                        .title(" Confirm "));
+                    f.render_widget(popup, popup_area);
+                }
+            }
+        }
+        AppMode::NewGroupName | AppMode::RenameGroup => {
+            let is_rename = app.mode == AppMode::RenameGroup;
+            let title = if is_rename { " Rename Group " } else { " New Group " };
+            let input = if is_rename { &app.dashboard.rename_input } else { &app.dashboard.new_group_name };
+
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled(" Group name: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}▌", input), Style::default().fg(Color::White)),
+            ]));
+            if let Some(ref err) = app.dashboard.error {
+                lines.push(Line::from(Span::styled(format!(" ⚠ {}", err), Style::default().fg(Color::Red))));
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(" Enter: confirm  Esc: cancel", Style::default().fg(Color::DarkGray))));
+
+            let box_h = lines.len() as u16 + 2;
+            let x = (main_area.width.saturating_sub(box_w)) / 2;
+            let y = (main_area.height.saturating_sub(box_h)) / 2;
+            let box_area = Rect::new(x, y, box_w, box_h);
+            let block = Block::default().borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(title);
+            f.render_widget(Paragraph::new(lines).block(block), box_area);
+
+            if !is_rename && y + box_h < main_area.height {
+                let hint_area = Rect::new(x, y + box_h + 1, box_w, 1);
+                let hint = Paragraph::new(Line::from(Span::styled(
+                    "Create a group for organizing proxies",
+                    Style::default().fg(Color::Rgb(80, 80, 80)),
+                ))).centered();
+                f.render_widget(hint, hint_area);
+            }
+        }
+        AppMode::NewGroupAddProxy => {
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(format!(" Group: {}", app.dashboard.new_group_name), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+            lines.push(Line::from(""));
+
+            if app.dashboard.new_group_proxies.is_empty() {
+                lines.push(Line::from(Span::styled(" No proxies yet", Style::default().fg(Color::DarkGray))));
+            } else {
+                for p in &app.dashboard.new_group_proxies {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("  {} ", p.name), Style::default().fg(Color::White)),
+                        Span::styled(format!("({} → {})", p.listen, p.remote), Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+            }
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(" n/Enter: add proxy  Esc: save & back", Style::default().fg(Color::DarkGray))));
+
+            let box_h = lines.len() as u16 + 2;
+            let x = (main_area.width.saturating_sub(box_w)) / 2;
+            let y = (main_area.height.saturating_sub(box_h)) / 2;
+            let box_area = Rect::new(x, y, box_w, box_h);
+            let block = Block::default().borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(" New Group ");
+            f.render_widget(Paragraph::new(lines).block(block), box_area);
+
+            // Proxy form popup if active
+            if let Some(ref form) = app.proxy_form {
+                let fw: u16 = 50;
+                let fh: u16 = 13;
+                let fx = (area.width.saturating_sub(fw)) / 2;
+                let fy = (area.height.saturating_sub(fh)) / 2;
+                let popup_area = Rect::new(fx, fy, fw, fh);
+                f.render_widget(Clear, popup_area);
+
+                let protocol = PROTOCOLS[form.protocol_idx];
+                let remote_default_port = default_port(protocol);
+                let rows: Vec<(usize, &str, &str, &str)> = vec![
+                    (0, "name", &form.fields[0], ""),
+                    (1, "protocol", protocol, ""),
+                    (2, "listen host", &form.fields[2], "127.0.0.1"),
+                    (3, "listen port", &form.fields[3], ""),
+                    (4, "remote host", &form.fields[4], "127.0.0.1"),
+                    (5, "remote port", &form.fields[5], remote_default_port),
+                ];
+                let mut form_lines: Vec<Line> = Vec::new();
+                for &(i, label, value, placeholder) in &rows {
+                    let cursor = if i == form.active_field { "▌" } else { "" };
+                    let label_style = if i == form.active_field { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) };
+                    let hint = if i == 1 && i == form.active_field { " ◀ ▶" } else { "" };
+                    let display = if value.is_empty() && !placeholder.is_empty() && i != form.active_field {
+                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(placeholder.to_string(), Style::default().fg(Color::Rgb(80, 80, 80)))]
+                    } else if value.is_empty() && !placeholder.is_empty() {
+                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(cursor.to_string(), Style::default().fg(Color::White)), Span::styled(format!(" ({})", placeholder), Style::default().fg(Color::Rgb(80, 80, 80)))]
+                    } else {
+                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(format!("{}{}", value, cursor), Style::default().fg(Color::White)), Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray))]
+                    };
+                    form_lines.push(Line::from(display));
+                }
+                form_lines.push(Line::from(""));
+                if let Some(ref err) = form.error {
+                    form_lines.push(Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))));
+                }
+                form_lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled("Esc", Style::default().fg(Color::DarkGray)), Span::raw(" cancel  "),
+                    Span::styled("Enter", Style::default().fg(Color::Green)), Span::raw(" save"),
+                ]));
+                let popup = Paragraph::new(form_lines)
+                    .block(Block::default().borders(Borders::ALL)
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(Style::default().fg(Color::Cyan)).title(" Add Proxy "));
+                f.render_widget(popup, popup_area);
+            }
+        }
+        AppMode::Main => {}
+    }
 }
 
 fn ui(f: &mut Frame, app: &mut App) {
@@ -1483,7 +2117,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             Line::from(vec![Span::styled(" f", Style::default().fg(Color::Cyan)), Span::raw("  → Toggle follow (tail -f)")]),
             Line::from(vec![Span::styled(" p", Style::default().fg(Color::Cyan)), Span::raw("  → Pause/resume stream")]),
             Line::from(vec![Span::styled(" ,", Style::default().fg(Color::Cyan)), Span::raw("  → Edit config")]),
-            Line::from(vec![Span::styled(" e", Style::default().fg(Color::Cyan)), Span::raw("  → Switch group")]),
+            Line::from(vec![Span::styled(" g", Style::default().fg(Color::Cyan)), Span::raw("  → Switch group")]),
             Line::from(""),
             Line::from(Span::styled(" Esc/any  → cancel", Style::default().fg(Color::DarkGray))),
         ];
@@ -1597,18 +2231,18 @@ fn ui(f: &mut Frame, app: &mut App) {
             let hint = if i == 1 && i == form.active_field { " ◀ ▶" } else { "" };
             let display = if value.is_empty() && !placeholder.is_empty() && i != form.active_field {
                 vec![
-                    Span::styled(format!(" {:>12}: ", label), label_style),
+                    Span::styled(format!("   {:>12}: ", label), label_style),
                     Span::styled(placeholder.to_string(), Style::default().fg(Color::Rgb(80, 80, 80))),
                 ]
             } else if value.is_empty() && !placeholder.is_empty() {
                 vec![
-                    Span::styled(format!(" {:>12}: ", label), label_style),
+                    Span::styled(format!("   {:>12}: ", label), label_style),
                     Span::styled(format!("{}", cursor), Style::default().fg(Color::White)),
                     Span::styled(format!(" ({})", placeholder), Style::default().fg(Color::Rgb(80, 80, 80))),
                 ]
             } else {
                 vec![
-                    Span::styled(format!(" {:>12}: ", label), label_style),
+                    Span::styled(format!("   {:>12}: ", label), label_style),
                     Span::styled(format!("{}{}", value, cursor), Style::default().fg(Color::White)),
                     Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray)),
                 ]
@@ -1617,14 +2251,14 @@ fn ui(f: &mut Frame, app: &mut App) {
         }
         lines.push(Line::from(""));
         if let Some(ref err) = form.error {
-            lines.push(Line::from(Span::styled(format!(" ⚠ {}", err), Style::default().fg(Color::Red))));
+            lines.push(Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))));
         }
         lines.push(Line::from(vec![
-            Span::styled(" Cancel", Style::default().fg(Color::DarkGray)),
-            Span::styled("(Esc)", Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled("Submit", Style::default().fg(Color::Green)),
-            Span::styled("(Enter)", Style::default().fg(Color::DarkGray)),
+            Span::raw("   "),
+            Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+            Span::raw(" cancel  "),
+            Span::styled("Enter", Style::default().fg(Color::Green)),
+            Span::raw(" submit"),
         ]));
 
         let popup = Paragraph::new(lines)
