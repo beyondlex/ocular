@@ -426,6 +426,7 @@ pub enum ProxyChange {
     StopAll,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut rx: broadcast::Receiver<ProxyEvent>,
     components: Vec<ComponentInfo>,
@@ -516,7 +517,7 @@ pub async fn run(
                                             if let Some(ref gdir) = app.group_dir.clone() {
                                                 let file = gdir.join(format!("{}.toml", g.name));
                                                 let _ = std::fs::remove_file(&file);
-                                                app.dashboard = DashboardState::load(&gdir, &app.main_config_path);
+                                                app.dashboard = DashboardState::load(gdir, &app.main_config_path);
                                                 if app.dashboard.selected >= app.dashboard.groups.len() {
                                                     app.dashboard.selected = app.dashboard.groups.len().saturating_sub(1);
                                                 }
@@ -2237,7 +2238,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             } else if value.is_empty() && !placeholder.is_empty() {
                 vec![
                     Span::styled(format!("   {:>12}: ", label), label_style),
-                    Span::styled(format!("{}", cursor), Style::default().fg(Color::White)),
+                    Span::styled(cursor.to_string(), Style::default().fg(Color::White)),
                     Span::styled(format!(" ({})", placeholder), Style::default().fg(Color::Rgb(80, 80, 80))),
                 ]
             } else {

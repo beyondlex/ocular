@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.7.0 (2026-05-25)
+
+### New Features
+- **Dashboard** — landing page to select and manage proxy groups before connecting
+  - Centered rounded-box UI with group list, scroll support (max 10 visible)
+  - `n` create group, `r` rename, `e` edit in $EDITOR, `d` delete with confirm, `/` filter
+  - New group wizard: name → add proxies interactively → save
+- **Proxy Groups** — organize proxies by environment, stored in `CONFIG_DIR/group/*.toml`
+  - Main config `[[proxy]]` entries treated as "default" group
+  - Switch groups from main TUI via `Space` → `g`
+  - `q` in main TUI returns to dashboard (not quit)
+- **Proxy CRUD** — create, edit, delete, inspect proxies from the component pane
+  - `n` new proxy form, `e` edit, `d` delete with confirm, `i` info popup
+  - Form splits host/port with protocol-aware default port placeholders
+  - Port-in-use validation, name uniqueness check
+- **Hot-reload proxy connections** — add/remove/modify `[[proxy]]` entries without restarting
+  - Existing connections drain naturally when a proxy is removed
+- **Component filter** — `/` in component pane for fuzzy search by name/listen/remote
+
+### Improvements
+- Component pane: event count colored (green >0, gray 0), address removed (use `i` for details)
+- Group name shown in gray after "All" in component pane
+- Filter indicators shown in orange (both component and event panes)
+- Filter input at bottom of component pane (nvim-style)
+- Proxy form fields visually balanced with proper indentation
+- Dashboard status bar hints centered
+- `Esc` no longer quits dashboard (only `q` / `Ctrl+C`)
+
+### Bug Fixes
+- Fix stale events appearing when switching groups (drain rx, filter by active components)
+- Fix proxies spawning at startup before user selects a group
+- Fix hot-reload watcher triggering before group is loaded
+- Fix component pane j/k navigation ignoring filter (cursor on invisible items)
+
 ## v0.6.0 (2026-05-24)
 
 ### New Features
