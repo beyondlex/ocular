@@ -95,6 +95,7 @@ enum Focus { Components, Events, Detail, Filter, ComponentFilter }
 #[derive(PartialEq, Clone)]
 enum AppMode {
     Dashboard,
+    GroupDetail,
     NewGroupName,
     NewGroupAddProxy,
     RenameGroup,
@@ -111,6 +112,10 @@ struct DashboardState {
     error: Option<String>,
     rename_input: String,
     delete_confirm: bool,
+    detail_proxies: Vec<NewProxyEntry>,
+    detail_selected: usize,
+    detail_group_name: String,
+    detail_delete_confirm: bool,
 }
 
 #[derive(Clone)]
@@ -157,7 +162,7 @@ impl DashboardState {
                 groups.push(DashboardGroup { name, proxies });
             }
         }
-        Self { groups, selected: 0, filter: String::new(), filter_active: false, new_group_name: String::new(), new_group_proxies: Vec::new(), error: None, rename_input: String::new(), delete_confirm: false }
+        Self { groups, selected: 0, filter: String::new(), filter_active: false, new_group_name: String::new(), new_group_proxies: Vec::new(), error: None, rename_input: String::new(), delete_confirm: false, detail_proxies: Vec::new(), detail_selected: 0, detail_group_name: String::new(), detail_delete_confirm: false }
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
@@ -207,6 +212,19 @@ impl ProxyForm {
             fields: [ci.name.clone(), String::new(), lh, lp, String::new(), String::new()],
             active_field: 0,
             editing_idx: Some(idx),
+            protocol_idx,
+            error: None,
+        }
+    }
+
+    fn from_entry(entry: &NewProxyEntry) -> Self {
+        let protocol_idx = PROTOCOLS.iter().position(|&p| p == &entry.protocol).unwrap_or(0);
+        let (lh, lp) = split_addr(&entry.listen);
+        let (rh, rp) = split_addr(&entry.remote);
+        Self {
+            fields: [entry.name.clone(), String::new(), lh, lp, rh, rp],
+            active_field: 0,
+            editing_idx: None,
             protocol_idx,
             error: None,
         }
@@ -633,6 +651,31 @@ pub async fn run(
                                         }
                                     }
                                 }
+                                KeyCode::Char(' ') => {
+                                    if let Some(g) = app.dashboard.groups.get(app.dashboard.selected).cloned() {
+                                        let group_file = if g.name == "default" {
+                                            app.main_config_path.clone()
+                                        } else if let Some(ref gdir) = app.group_dir {
+                                            gdir.join(format!("{}.toml", g.name))
+                                        } else {
+                                            continue;
+                                        };
+                                        if let Ok(content) = std::fs::read_to_string(&group_file) {
+                                            if let Ok(cfg) = toml::from_str::<ReloadableConfig>(&content) {
+                                                app.dashboard.detail_group_name = g.name.clone();
+                                                app.dashboard.detail_proxies = cfg.proxy.iter().map(|p| NewProxyEntry {
+                                                    name: p.name.clone(),
+                                                    protocol: p.protocol.clone(),
+                                                    listen: p.listen.clone(),
+                                                    remote: p.remote.clone(),
+                                                }).collect();
+                                                app.dashboard.detail_selected = 0;
+                                                app.proxy_form = None;
+                                                app.mode = AppMode::GroupDetail;
+                                            }
+                                        }
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -746,6 +789,137 @@ pub async fn run(
                                 KeyCode::Backspace => { app.dashboard.rename_input.pop(); app.dashboard.error = None; }
                                 KeyCode::Char(c) => { app.dashboard.rename_input.push(c); app.dashboard.error = None; }
                                 _ => {}
+                            }
+                        }
+                        AppMode::GroupDetail => {
+                            if app.dashboard.detail_delete_confirm {
+                                match key.code {
+                                    KeyCode::Char('y') | KeyCode::Enter => {
+                                        if app.dashboard.detail_selected < app.dashboard.detail_proxies.len() {
+                                            app.dashboard.detail_proxies.remove(app.dashboard.detail_selected);
+                                            if app.dashboard.detail_selected >= app.dashboard.detail_proxies.len() && !app.dashboard.detail_proxies.is_empty() {
+                                                app.dashboard.detail_selected = app.dashboard.detail_proxies.len() - 1;
+                                            }
+                                            // Save to file
+                                            let group_file = if app.dashboard.detail_group_name == "default" {
+                                                app.main_config_path.clone()
+                                            } else if let Some(ref gdir) = app.group_dir {
+                                                gdir.join(format!("{}.toml", app.dashboard.detail_group_name))
+                                            } else {
+                                                app.dashboard.detail_delete_confirm = false;
+                                                continue;
+                                            };
+                                            let mut content = String::new();
+                                            for p in &app.dashboard.detail_proxies {
+                                                content.push_str(&format!("[[proxy]]\nname = \"{}\"\nprotocol = \"{}\"\nlisten = \"{}\"\nremote = \"{}\"\n\n", p.name, p.protocol, p.listen, p.remote));
+                                            }
+                                            let _ = std::fs::write(&group_file, content);
+                                            app.dashboard.detail_delete_confirm = false;
+                                            continue;
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                                app.dashboard.detail_delete_confirm = false;
+                                continue;
+                            }
+                            if let Some(ref mut form) = app.proxy_form {
+                                match key.code {
+                                    KeyCode::Esc => { app.proxy_form = None; }
+                                    KeyCode::Tab => { form.active_field = (form.active_field + 1) % 6; form.error = None; }
+                                    KeyCode::BackTab => { form.active_field = (form.active_field + 5) % 6; form.error = None; }
+                                    KeyCode::Enter => {
+                                        let protocol = PROTOCOLS[form.protocol_idx];
+                                        let name = form.fields[0].trim().to_string();
+                                        let listen_host = if form.fields[2].is_empty() { "127.0.0.1" } else { form.fields[2].trim() };
+                                        let listen_port = form.fields[3].trim();
+                                        let remote_host = if form.fields[4].is_empty() { "127.0.0.1" } else { form.fields[4].trim() };
+                                        let remote_port = if form.fields[5].is_empty() { default_port(protocol) } else { form.fields[5].trim() };
+                                        if name.is_empty() {
+                                            form.error = Some("name is required".into());
+                                        } else if listen_port.is_empty() {
+                                            form.error = Some("listen port is required".into());
+                                        } else if app.dashboard.detail_proxies.iter().any(|p| p.name == name)
+                                            && form.editing_idx.is_none() {
+                                            form.error = Some(format!("name \"{}\" already exists", name));
+                                        } else {
+                                            let listen = format!("{}:{}", listen_host, listen_port);
+                                            let remote = format!("{}:{}", remote_host, remote_port);
+                                            if let Some(idx) = form.editing_idx {
+                                                if idx < app.dashboard.detail_proxies.len() {
+                                                    app.dashboard.detail_proxies[idx] = NewProxyEntry {
+                                                        name, protocol: protocol.to_string(), listen, remote,
+                                                    };
+                                                }
+                                            } else {
+                                                app.dashboard.detail_proxies.push(NewProxyEntry {
+                                                    name, protocol: protocol.to_string(), listen, remote,
+                                                });
+                                            }
+                                            // Save to file
+                                            let group_file = if app.dashboard.detail_group_name == "default" {
+                                                app.main_config_path.clone()
+                                            } else if let Some(ref gdir) = app.group_dir {
+                                                gdir.join(format!("{}.toml", app.dashboard.detail_group_name))
+                                            } else {
+                                                app.proxy_form = None;
+                                                continue;
+                                            };
+                                            let mut content = String::new();
+                                            for p in &app.dashboard.detail_proxies {
+                                                content.push_str(&format!("[[proxy]]\nname = \"{}\"\nprotocol = \"{}\"\nlisten = \"{}\"\nremote = \"{}\"\n\n", p.name, p.protocol, p.listen, p.remote));
+                                            }
+                                            let _ = std::fs::write(&group_file, content);
+                                            app.proxy_form = None;
+                                        }
+                                    }
+                                    KeyCode::Left if form.active_field == 1 => { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
+                                    KeyCode::Right if form.active_field == 1 => { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
+                                    KeyCode::Backspace => {
+                                        if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
+                                        else { form.fields[form.active_field].pop(); }
+                                        form.error = None;
+                                    }
+                                    KeyCode::Char(c) => {
+                                        if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
+                                        else { form.fields[form.active_field].push(c); }
+                                        form.error = None;
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                match key.code {
+                                    KeyCode::Esc => {
+                                        if let Some(ref gdir) = app.group_dir {
+                                            app.dashboard = DashboardState::load(gdir, &app.main_config_path);
+                                        }
+                                        app.mode = AppMode::Dashboard;
+                                    }
+                                    KeyCode::Char('j') | KeyCode::Down => {
+                                        if app.dashboard.detail_selected + 1 < app.dashboard.detail_proxies.len() {
+                                            app.dashboard.detail_selected += 1;
+                                        }
+                                    }
+                                    KeyCode::Char('k') | KeyCode::Up => {
+                                        app.dashboard.detail_selected = app.dashboard.detail_selected.saturating_sub(1);
+                                    }
+                                    KeyCode::Char('n') => {
+                                        app.proxy_form = Some(ProxyForm::default());
+                                    }
+                                    KeyCode::Char('e') => {
+                                        if let Some(entry) = app.dashboard.detail_proxies.get(app.dashboard.detail_selected) {
+                                            let mut form = ProxyForm::from_entry(entry);
+                                            form.editing_idx = Some(app.dashboard.detail_selected);
+                                            app.proxy_form = Some(form);
+                                        }
+                                    }
+                                    KeyCode::Char('d') => {
+                                        if !app.dashboard.detail_proxies.is_empty() {
+                                            app.dashboard.detail_delete_confirm = true;
+                                        }
+                                    }
+                                    _ => {}
+                                }
                             }
                         }
                         AppMode::Main => unreachable!(),
@@ -1468,12 +1642,6 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
     match &app.mode {
         AppMode::Dashboard => {
             let mut lines: Vec<Line> = Vec::new();
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled("Ocular ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("v{}", env!("CARGO_PKG_VERSION")), Style::default().fg(Color::DarkGray)),
-            ]).centered());
-            lines.push(Line::from(""));
 
             let visible = app.dashboard.filtered_indices();
             let max_visible: usize = 10;
@@ -1522,14 +1690,36 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
             lines.push(Line::from(""));
 
             let box_h = lines.len() as u16 + 2;
+            let art_h: u16 = 4; // 3 lines ASCII art + 1 line version
+            let gap: u16 = 1;
             let x = (main_area.width.saturating_sub(box_w)) / 2;
-            let y = (main_area.height.saturating_sub(box_h)) / 2;
+            let y = (main_area.height.saturating_sub(art_h + gap + box_h)) / 2 + art_h + gap;
             let box_area = Rect::new(x, y, box_w, box_h);
             let block = Block::default().borders(Borders::ALL)
                 .border_type(ratatui::widgets::BorderType::Rounded)
-                .border_style(Style::default().fg(Color::DarkGray));
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title_top(Line::from(vec![Span::styled(" Groups ", Style::default().fg(Color::DarkGray))]));
             let content = Paragraph::new(lines).block(block);
             f.render_widget(content, box_area);
+
+            // Render ASCII art title above box
+            let ascii_art = [
+                "▄▖    ▜     ",
+                "▌▌▛▘▌▌▐ ▀▌▛▘",
+                "▙▌▙▖▙▌▐▖█▌▌ ",
+            ];
+
+            let mut art_lines: Vec<Line> = ascii_art.iter().map(|s| {
+                Line::from(Span::styled(*s, Style::default().fg(Color::Cyan))).centered()
+            }).collect();
+            art_lines.push(
+                Line::from(Span::styled(
+                    format!("v{}", env!("CARGO_PKG_VERSION")),
+                    Style::default().fg(Color::DarkGray),
+                )).centered(),
+            );
+            let art_area = Rect::new(x, y - gap - art_h, box_w, art_h);
+            f.render_widget(Paragraph::new(art_lines), art_area);
 
             // Filter input at bottom of box
             if app.dashboard.filter_active {
@@ -1558,6 +1748,8 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                     Span::styled("d", key_style), Span::raw(" delete "),
                     Span::styled("│", sep), Span::raw(" "),
                     Span::styled("/", key_style), Span::raw(" filter "),
+                    Span::styled("│", sep), Span::raw(" "),
+                    Span::styled("Space", key_style), Span::raw(" detail "),
                     Span::styled("│", sep), Span::raw(" "),
                     Span::styled("↵", key_style), Span::raw(" load "),
                     Span::styled("│", sep), Span::raw(" "),
@@ -1709,6 +1901,150 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                         .border_style(Style::default().fg(Color::Cyan)).title(" Add Proxy "));
                 f.render_widget(popup, popup_area);
             }
+        }
+        AppMode::GroupDetail => {
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!(" Group: {}", app.dashboard.detail_group_name),
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            )));
+            lines.push(Line::from(""));
+
+            if app.dashboard.detail_proxies.is_empty() {
+                lines.push(Line::from(Span::styled(" No proxies", Style::default().fg(Color::DarkGray))));
+            } else {
+                for (i, p) in app.dashboard.detail_proxies.iter().enumerate() {
+                    let is_selected = i == app.dashboard.detail_selected;
+                    let prefix = if is_selected { " ▸ " } else { "   " };
+                    let name_style = if is_selected {
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(Color::Cyan)),
+                        Span::styled(format!("{:<10}", p.name), name_style),
+                        Span::styled(format!(" {} \u{2192} {} ", p.listen, p.remote), Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+            }
+            lines.push(Line::from(""));
+            if app.proxy_form.is_none() {
+                lines.push(Line::from(Span::styled(
+                    " n add  |  e edit  |  d delete  |  Esc back",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+
+            let box_h = lines.len() as u16 + 2;
+            let x = (main_area.width.saturating_sub(box_w)) / 2;
+            let y = (main_area.height.saturating_sub(box_h)) / 2;
+            let box_area = Rect::new(x, y, box_w, box_h);
+            let block = Block::default().borders(Borders::ALL)
+                .border_type(ratatui::widgets::BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title_top(Line::from(vec![
+                    Span::styled(" ", Style::default()),
+                    Span::styled(app.dashboard.detail_group_name.clone(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                    Span::styled(" ", Style::default()),
+                ]));
+            let content = Paragraph::new(lines).block(block);
+            f.render_widget(content, box_area);
+
+            // Proxy form popup
+            if let Some(ref form) = app.proxy_form {
+                let fw: u16 = 50;
+                let fh: u16 = 13;
+                let fx = (area.width.saturating_sub(fw)) / 2;
+                let fy = (area.height.saturating_sub(fh)) / 2;
+                let popup_area = Rect::new(fx, fy, fw, fh);
+                f.render_widget(Clear, popup_area);
+
+                let protocol = PROTOCOLS[form.protocol_idx];
+                let remote_default_port = default_port(protocol);
+                let rows: Vec<(usize, &str, &str, &str)> = vec![
+                    (0, "name", &form.fields[0], ""),
+                    (1, "protocol", protocol, ""),
+                    (2, "listen host", &form.fields[2], "127.0.0.1"),
+                    (3, "listen port", &form.fields[3], ""),
+                    (4, "remote host", &form.fields[4], "127.0.0.1"),
+                    (5, "remote port", &form.fields[5], remote_default_port),
+                ];
+                let mut form_lines: Vec<Line> = Vec::new();
+                for &(i, label, value, placeholder) in &rows {
+                    let cursor = if i == form.active_field { "▌" } else { "" };
+                    let label_style = if i == form.active_field { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) };
+                    let hint = if i == 1 && i == form.active_field { " ◀ ▶" } else { "" };
+                    let display = if value.is_empty() && !placeholder.is_empty() && i != form.active_field {
+                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(placeholder.to_string(), Style::default().fg(Color::Rgb(80, 80, 80)))]
+                    } else if value.is_empty() && !placeholder.is_empty() {
+                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(cursor.to_string(), Style::default().fg(Color::White)), Span::styled(format!(" ({})", placeholder), Style::default().fg(Color::Rgb(80, 80, 80)))]
+                    } else {
+                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(format!("{}{}", value, cursor), Style::default().fg(Color::White)), Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray))]
+                    };
+                    form_lines.push(Line::from(display));
+                }
+                form_lines.push(Line::from(""));
+                if let Some(ref err) = form.error {
+                    form_lines.push(Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))));
+                }
+                form_lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled("Esc", Style::default().fg(Color::DarkGray)), Span::raw(" cancel  "),
+                    Span::styled("Enter", Style::default().fg(Color::Green)), Span::raw(" save"),
+                ]));
+                let popup = Paragraph::new(form_lines)
+                    .block(Block::default().borders(Borders::ALL)
+                        .border_type(ratatui::widgets::BorderType::Rounded)
+                        .border_style(Style::default().fg(Color::Cyan)).title(" Add Proxy "));
+                f.render_widget(popup, popup_area);
+            }
+
+            // Delete confirm popup
+            if app.dashboard.detail_delete_confirm {
+                let w: u16 = 36;
+                let h: u16 = 5;
+                let x = (area.width.saturating_sub(w)) / 2;
+                let y = (area.height.saturating_sub(h)) / 2;
+                let popup_area = Rect::new(x, y, w, h);
+                f.render_widget(Clear, popup_area);
+                let name = app.dashboard.detail_proxies.get(app.dashboard.detail_selected).map(|p| p.name.as_str()).unwrap_or("");
+                let lines = vec![
+                    Line::from(format!(" Delete \"{}\"?", name)),
+                    Line::from(""),
+                    Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled("y/Enter", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+                        Span::raw(" confirm  "),
+                        Span::styled("n/Esc", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                        Span::raw(" cancel"),
+                    ]),
+                ];
+                let popup = Paragraph::new(lines).block(Block::default().borders(Borders::ALL)
+                    .border_type(ratatui::widgets::BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(" Confirm "));
+                f.render_widget(popup, popup_area);
+            }
+
+            // Status bar
+            let key_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+            let sep = Style::default().fg(Color::DarkGray);
+            let status = Line::from(vec![
+                Span::raw(" "),
+                Span::styled("n", key_style), Span::raw(" add "),
+                Span::styled("│", sep), Span::raw(" "),
+                Span::styled("e", key_style), Span::raw(" edit "),
+                Span::styled("│", sep), Span::raw(" "),
+                Span::styled("d", key_style), Span::raw(" delete "),
+                Span::styled("│", sep), Span::raw(" "),
+                Span::styled("Esc", key_style), Span::raw(" back"),
+            ]).centered();
+            let status_block = Block::default().borders(Borders::TOP | Borders::BOTTOM).border_style(Style::default().fg(Color::DarkGray));
+            let status_inner = status_block.inner(chunks[1]);
+            f.render_widget(status_block, chunks[1]);
+            f.render_widget(Paragraph::new(status), status_inner);
         }
         AppMode::Main => {}
     }
