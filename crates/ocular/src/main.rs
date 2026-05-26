@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::path::PathBuf;
 use std::time::SystemTime;
 use tokio::sync::broadcast;
@@ -142,6 +143,7 @@ fn apply_proxy_diff(
     tx: &broadcast::Sender<ocular_proxy::ProxyEvent>,
     change_tx: &broadcast::Sender<ProxyChange>,
     global_excludes: &HashMap<String, ExcludeConfig>,
+    new_status: ocular_proxy::StatusMap,
 ) {
     let new_names: HashMap<String, &ProxyConfig> = new_proxies.iter()
         .map(|p| (p.name.clone(), p)).collect();
@@ -165,7 +167,7 @@ fn apply_proxy_diff(
                 let _ = ph.shutdown_tx.send(true);
                 let _ = change_tx.send(ProxyChange::Removed(name.clone()));
             }
-            let ph = spawn_proxy(new_cfg, tx);
+            let ph = spawn_proxy(new_cfg, tx, new_status.clone());
             handles.insert(name.clone(), ph);
             let ci = make_component_info(new_cfg, global_excludes);
             let _ = change_tx.send(ProxyChange::Added(ci));
@@ -176,6 +178,7 @@ fn apply_proxy_diff(
 fn spawn_proxy(
     cfg: &ProxyConfig,
     tx: &broadcast::Sender<ocular_proxy::ProxyEvent>,
+    status: ocular_proxy::StatusMap,
 ) -> ProxyHandle {
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let tx = tx.clone();
@@ -188,8 +191,9 @@ fn spawn_proxy(
     let listen = cfg.listen.clone();
     let remote = cfg.remote.clone();
     let name = cfg.name.clone();
+    let status = status.clone();
     let handle = tokio::spawn(async move {
-        if let Err(e) = ocular_proxy::run_proxy(listen, remote, name, protocol, tx, shutdown_rx).await {
+        if let Err(e) = ocular_proxy::run_proxy(listen, remote, name, protocol, tx, shutdown_rx, status).await {
             tracing::error!(error = %e, "proxy fatal error");
         }
     });
@@ -212,7 +216,8 @@ async fn main() -> Result<()> {
         let components = demo::demo_components();
         let theme = ocular_tui::Theme::by_name("tokyo-night-storm");
         let config_path = PathBuf::from("ocular.toml");
-        return ocular_tui::run(rx, components, theme, config_path.clone(), None, true, false, None, None, None, None, config_path).await;
+        let demo_status: ocular_proxy::StatusMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        return ocular_tui::run(rx, components, theme, config_path.clone(), None, true, false, None, None, None, None, config_path, demo_status).await;
     }
 
     let (config, config_dir, config_path) = load_config()?;
@@ -258,6 +263,7 @@ async fn main() -> Result<()> {
 
     let (tx, _) = broadcast::channel::<ocular_proxy::ProxyEvent>(1024);
     let (proxy_change_tx, proxy_change_rx) = broadcast::channel::<ProxyChange>(64);
+    let status_map: ocular_proxy::StatusMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     // Don't spawn proxies at startup — wait for user to select a group in Dashboard
     let proxy_handles: HashMap<String, ProxyHandle> = HashMap::new();
@@ -268,6 +274,7 @@ async fn main() -> Result<()> {
     let proxy_change_tx_clone = proxy_change_tx.clone();
     let initial_excludes = config.exclude.clone();
     let _group_dir_watch = group_dir.clone();
+    let status_watcher = status_map.clone();
     tokio::spawn(async move {
         let mut last_mtime = SystemTime::UNIX_EPOCH;
         let mut handles = proxy_handles;
@@ -299,7 +306,7 @@ async fn main() -> Result<()> {
                     };
 
                     global_excludes = new_config.exclude.clone();
-                    apply_proxy_diff(&mut handles, &new_config.proxy, &tx_reload, &proxy_change_tx_clone, &global_excludes);
+                    apply_proxy_diff(&mut handles, &new_config.proxy, &tx_reload, &proxy_change_tx_clone, &global_excludes, status_watcher.clone());
                 }
                 Ok(change) = change_rx.recv() => {
                     match change {
@@ -313,7 +320,7 @@ async fn main() -> Result<()> {
                             if let Ok(content) = std::fs::read_to_string(&new_path) {
                                 if let Ok(new_config) = toml::from_str::<Config>(&content) {
                                     for proxy_cfg in &new_config.proxy {
-                                        let ph = spawn_proxy(proxy_cfg, &tx_reload);
+                                        let ph = spawn_proxy(proxy_cfg, &tx_reload, status_watcher.clone());
                                         handles.insert(proxy_cfg.name.clone(), ph);
                                         info!(component = %proxy_cfg.name, "proxy started for group switch");
                                     }
@@ -391,5 +398,5 @@ async fn main() -> Result<()> {
         base_theme
     };
 
-    ocular_tui::run(rx, components, theme, active_config_path, config.event_format, config.leader_menu, config.quit_confirm, Some(proxy_change_rx), Some(group_dir), active_group, Some(proxy_change_tx), config_path).await
+    ocular_tui::run(rx, components, theme, active_config_path, config.event_format, config.leader_menu, config.quit_confirm, Some(proxy_change_rx), Some(group_dir), active_group, Some(proxy_change_tx), config_path, status_map).await
 }

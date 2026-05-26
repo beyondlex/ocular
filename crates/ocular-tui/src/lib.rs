@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use ocular_proxy::ProxyEvent;
+use ocular_proxy::{ProxyEvent, StatusMap};
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
@@ -285,6 +285,7 @@ struct App {
     mode: AppMode,
     dashboard: DashboardState,
     main_config_path: PathBuf,
+    status_map: StatusMap,
     // Cached resources
     fuzzy_matcher: SkimMatcherV2,
     dirty: bool,
@@ -497,6 +498,7 @@ pub async fn run(
     active_group: Option<String>,
     proxy_change_tx: Option<broadcast::Sender<ProxyChange>>,
     main_config_path: PathBuf,
+    status_map: StatusMap,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -549,6 +551,7 @@ pub async fn run(
             &main_config_path,
         ),
         main_config_path: main_config_path.clone(),
+        status_map,
         fuzzy_matcher: SkimMatcherV2::default(),
         dirty: true,
         cached_filtered_indices: Vec::new(),
@@ -2134,10 +2137,25 @@ fn ui(f: &mut Frame, app: &mut App) {
             } else {
                 Style::default()
             };
+            let status = app.status_map.lock().unwrap().get(&c.name).cloned();
+            let in_cooldown = status.as_ref()
+                .and_then(|s| s.last_active_at.as_ref())
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d < Duration::from_secs(3))
+                .unwrap_or(false);
+            let (dot, dot_color) = match status {
+                Some(s) if s.last_error.is_some() => ("◎", Color::Yellow),
+                Some(s) if s.active_connections > 0 => ("●", Color::Green),
+                _ if in_cooldown => ("●", Color::Green),
+                Some(s) if s.has_connector => ("○", Color::DarkGray),
+                _ => ("○", Color::Gray),
+            };
             let count = app.events.iter().filter(|ev| ev.component == c.name).count();
             let count_style = if count > 0 { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{} {}", prefix, c.name), style),
+                Span::raw(format!("{} ", prefix)),
+                Span::styled(dot, Style::default().fg(dot_color)),
+                Span::styled(format!(" {}", c.name), style),
                 Span::styled(format!(" {}", count), count_style),
             ])).style(style)
         }));
@@ -2152,10 +2170,25 @@ fn ui(f: &mut Frame, app: &mut App) {
             } else {
                 Style::default()
             };
+            let status = app.status_map.lock().unwrap().get(&c.name).cloned();
+            let in_cooldown = status.as_ref()
+                .and_then(|s| s.last_active_at.as_ref())
+                .and_then(|t| t.elapsed().ok())
+                .map(|d| d < Duration::from_secs(3))
+                .unwrap_or(false);
+            let (dot, dot_color) = match status {
+                Some(s) if s.last_error.is_some() => ("◎", Color::Yellow),
+                Some(s) if s.active_connections > 0 => ("●", Color::Green),
+                _ if in_cooldown => ("●", Color::Green),
+                Some(s) if s.has_connector => ("○", Color::DarkGray),
+                _ => ("○", Color::Gray),
+            };
             let count = app.events.iter().filter(|ev| ev.component == c.name).count();
             let count_style = if count > 0 { Style::default().fg(Color::Green) } else { Style::default().fg(Color::DarkGray) };
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{} {}", prefix, c.name), style),
+                Span::raw(format!("{} ", prefix)),
+                Span::styled(dot, Style::default().fg(dot_color)),
+                Span::styled(format!(" {}", c.name), style),
                 Span::styled(format!(" {}", count), count_style),
             ])).style(style)
         }));

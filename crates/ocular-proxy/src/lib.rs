@@ -2,12 +2,25 @@ use anyhow::Result;
 use ocular_protocol::{Protocol, mysql::mysql_response_complete, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tracing::{info, warn, error, debug};
 
 pub use ocular_protocol::ProxyEvent;
+
+/// Connection state for a proxy component, shared between proxy and TUI
+#[derive(Clone, Default)]
+pub struct ConnectionState {
+    pub active_connections: usize,
+    pub has_connector: bool,
+    pub last_error: Option<String>,
+    pub last_active_at: Option<SystemTime>,
+}
+
+/// Shared map from component name to connection state
+pub type StatusMap = Arc<Mutex<std::collections::HashMap<String, ConnectionState>>>;
 
 /// Pending request info
 struct PendingRequest {
@@ -24,8 +37,20 @@ pub async fn run_proxy(
     protocol: Protocol,
     tx: broadcast::Sender<ProxyEvent>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
+    status: StatusMap,
 ) -> Result<()> {
-    let listener = TcpListener::bind(&listen_addr).await?;
+    let listener = match TcpListener::bind(&listen_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            status.lock().unwrap().entry(name.clone()).or_default().last_error = Some(format!("bind failed: {}", e));
+            return Err(e.into());
+        }
+    };
+    let conn_count = Arc::new(AtomicUsize::new(0));
+    {
+        let mut map = status.lock().unwrap();
+        map.entry(name.clone()).or_default().has_connector = true;
+    }
     info!(component = %name, listen = %listen_addr, remote = %remote_addr, ?protocol, "proxy listening");
 
     loop {
@@ -39,10 +64,23 @@ pub async fn run_proxy(
                 let process = resolve_peer_process(peer.port());
                 let peer_addr = peer.to_string();
                 let remote_for_conn = remote.clone();
+                let conn_count = conn_count.clone();
+                let status = status.clone();
+                let protocol_for_conn = protocol;
                 tokio::spawn(async move {
-                    if let Err(e) = handle_conn(client, &remote, &name, protocol, &tx, process, peer_addr, remote_for_conn).await {
-                        warn!(component = %name, remote = %remote, error = %e, "connection ended with error");
+                    conn_count.fetch_add(1, Ordering::Relaxed);
+                    {
+                        let mut map = status.lock().unwrap();
+                        let s = map.entry(name.clone()).or_default();
+                        s.active_connections = conn_count.load(Ordering::Relaxed);
+                        s.last_active_at = Some(SystemTime::now());
                     }
+                    if let Err(e) = handle_conn(client, &remote, &name, protocol_for_conn, &tx, process, peer_addr, remote_for_conn).await {
+                        warn!(component = %name, remote = %remote, error = %e, "connection ended with error");
+                        status.lock().unwrap().entry(name.clone()).or_default().last_error = Some(e.to_string());
+                    }
+                    let remaining = conn_count.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
+                    status.lock().unwrap().entry(name.clone()).or_default().active_connections = remaining;
                 });
             }
             _ = shutdown.changed() => {
