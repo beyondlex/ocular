@@ -2250,7 +2250,7 @@ fn ui(f: &mut Frame, app: &mut App) {
                         let (raw, style) = match name.as_str() {
                             "index" => (format!("{}", orig_idx + 1), theme.line_number),
                             "time" => (time.clone(), theme.timestamp),
-                            "component" => (ev.component.to_string(), if ev.system { Style::default().fg(Color::Red) } else { theme.component_style(&ev.component) }),
+                            "component" => (ev.component.to_string(), if ev.system { Style::default().fg(Color::Red) } else { theme.component_style(ev.protocol) }),
                             "command" => (ev.command.clone(), if ev.system { Style::default().fg(Color::Red) } else { theme.command }),
                             "latency" => {
                                 let style = if app.latency_threshold_ms.is_some_and(|t| ev.latency.as_secs_f64() * 1000.0 > t) {

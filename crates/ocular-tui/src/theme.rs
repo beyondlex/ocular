@@ -24,6 +24,14 @@ pub struct ThemeConfig {
     #[serde(default)]
     pub component_postgres: StyleConfig,
     #[serde(default)]
+    pub component_mongodb: StyleConfig,
+    #[serde(default)]
+    pub component_kafka: StyleConfig,
+    #[serde(default)]
+    pub component_http: StyleConfig,
+    #[serde(default)]
+    pub component_memcached: StyleConfig,
+    #[serde(default)]
     pub component_default: StyleConfig,
     #[serde(default)]
     pub command: StyleConfig,
@@ -49,6 +57,10 @@ pub struct Theme {
     pub component_mysql: Style,
     pub component_rabbitmq: Style,
     pub component_postgres: Style,
+    pub component_mongodb: Style,
+    pub component_kafka: Style,
+    pub component_http: Style,
+    pub component_memcached: Style,
     pub component_default: Style,
     pub command: Style,
     pub latency: Style,
@@ -60,18 +72,16 @@ pub struct Theme {
 }
 
 impl Theme {
-    pub fn component_style(&self, name: &str) -> Style {
-        let n = name.to_lowercase();
-        if n.contains("redis") {
-            self.component_redis
-        } else if n.contains("mysql") {
-            self.component_mysql
-        } else if n.contains("rabbitmq") || n.contains("amqp") {
-            self.component_rabbitmq
-        } else if n.contains("postgres") {
-            self.component_postgres
-        } else {
-            self.component_default
+    pub fn component_style(&self, protocol: ocular_protocol::Protocol) -> Style {
+        match protocol {
+            ocular_protocol::Protocol::Redis => self.component_redis,
+            ocular_protocol::Protocol::Mysql => self.component_mysql,
+            ocular_protocol::Protocol::Amqp => self.component_rabbitmq,
+            ocular_protocol::Protocol::Postgres => self.component_postgres,
+            ocular_protocol::Protocol::Mongodb => self.component_mongodb,
+            ocular_protocol::Protocol::Kafka => self.component_kafka,
+            ocular_protocol::Protocol::Http => self.component_http,
+            ocular_protocol::Protocol::Memcached => self.component_memcached,
         }
     }
 
@@ -94,6 +104,10 @@ impl Theme {
             component_mysql: apply_style_config(&cfg.component_mysql, base.component_mysql),
             component_rabbitmq: apply_style_config(&cfg.component_rabbitmq, base.component_rabbitmq),
             component_postgres: apply_style_config(&cfg.component_postgres, base.component_postgres),
+            component_mongodb: apply_style_config(&cfg.component_mongodb, base.component_mongodb),
+            component_kafka: apply_style_config(&cfg.component_kafka, base.component_kafka),
+            component_http: apply_style_config(&cfg.component_http, base.component_http),
+            component_memcached: apply_style_config(&cfg.component_memcached, base.component_memcached),
             component_default: apply_style_config(&cfg.component_default, base.component_default),
             command: apply_style_config(&cfg.command, base.command),
             latency: apply_style_config(&cfg.latency, base.latency),
@@ -112,6 +126,10 @@ impl Theme {
             component_mysql: style(Some("rgb(125,174,255)"), None, true),
             component_rabbitmq: style(Some("rgb(255,158,100)"), None, true),
             component_postgres: style(Some("rgb(100,180,220)"), None, true),
+            component_mongodb: style(Some("rgb(77,179,61)"), None, true),
+            component_kafka: style(Some("rgb(200,120,255)"), None, true),
+            component_http: style(Some("rgb(224,175,104)"), None, true),
+            component_memcached: style(Some("rgb(115,218,202)"), None, true),
             component_default: style(Some("rgb(115,218,202)"), None, true),
             command: style(Some("rgb(192,202,220)"), None, false),
             latency: style(Some("rgb(120,130,150)"), None, false),
@@ -130,6 +148,10 @@ impl Theme {
             component_mysql: style(Some("rgb(139,233,253)"), None, true),
             component_rabbitmq: style(Some("rgb(255,184,108)"), None, true),
             component_postgres: style(Some("rgb(139,233,253)"), None, true),
+            component_mongodb: style(Some("rgb(80,250,123)"), None, true),
+            component_kafka: style(Some("rgb(189,147,249)"), None, true),
+            component_http: style(Some("rgb(241,250,140)"), None, true),
+            component_memcached: style(Some("rgb(255,121,198)"), None, true),
             component_default: style(Some("rgb(80,250,123)"), None, true),
             command: style(Some("rgb(248,248,242)"), None, false),
             latency: style(Some("rgb(98,114,164)"), None, false),
@@ -148,6 +170,10 @@ impl Theme {
             component_mysql: style(Some("rgb(38,139,210)"), None, true),
             component_rabbitmq: style(Some("rgb(203,75,22)"), None, true),
             component_postgres: style(Some("rgb(42,161,152)"), None, true),
+            component_mongodb: style(Some("rgb(133,153,0)"), None, true),
+            component_kafka: style(Some("rgb(108,113,196)"), None, true),
+            component_http: style(Some("rgb(181,137,0)"), None, true),
+            component_memcached: style(Some("rgb(211,54,130)"), None, true),
             component_default: style(Some("rgb(133,153,0)"), None, true),
             command: style(Some("rgb(88,110,117)"), None, false),
             latency: style(Some("rgb(147,161,161)"), None, false),
@@ -166,6 +192,10 @@ impl Theme {
             component_mysql: style(Some("rgb(38,139,210)"), None, true),
             component_rabbitmq: style(Some("rgb(203,75,22)"), None, true),
             component_postgres: style(Some("rgb(42,161,152)"), None, true),
+            component_mongodb: style(Some("rgb(133,153,0)"), None, true),
+            component_kafka: style(Some("rgb(108,113,196)"), None, true),
+            component_http: style(Some("rgb(181,137,0)"), None, true),
+            component_memcached: style(Some("rgb(211,54,130)"), None, true),
             component_default: style(Some("rgb(133,153,0)"), None, true),
             command: style(Some("rgb(147,161,161)"), None, false),
             latency: style(Some("rgb(88,110,117)"), None, false),
@@ -186,7 +216,11 @@ impl Default for Theme {
             component_mysql: style(Some("rgb(80,140,255)"), None, true),
             component_rabbitmq: style(Some("rgb(255,140,0)"), None, true),
             component_postgres: style(Some("rgb(100,180,220)"), None, true),
-            component_default: style(Some("rgb(80,200,120)"), None, true),
+            component_mongodb: style(Some("rgb(80,200,120)"), None, true),
+            component_kafka: style(Some("rgb(180,100,255)"), None, true),
+            component_http: style(Some("rgb(220,180,50)"), None, true),
+            component_memcached: style(Some("rgb(220,100,180)"), None, true),
+            component_default: style(Some("rgb(150,150,150)"), None, true),
             command: style(Some("rgb(220,220,220)"), None, false),
             latency: style(Some("rgb(140,140,140)"), None, false),
             line_number: style(Some("rgb(100,100,100)"), None, false),
