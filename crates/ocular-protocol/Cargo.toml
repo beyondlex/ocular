@@ -8,3 +8,7 @@ description = "Wire protocol parsers for ocular (Redis, MySQL, PostgreSQL, Mongo
 
 [dependencies]
 anyhow.workspace = true
+flate2.workspace = true
+snap.workspace = true
+lz4_flex.workspace = true
+zstd.workspace = true

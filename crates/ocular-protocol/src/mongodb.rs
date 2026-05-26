@@ -188,7 +188,7 @@ fn extract_body_doc(buf: &[u8]) -> Option<Vec<u8>> {
     if buf.len() < 21 { return None; } // header(16) + flags(4) + kind(1)
     let opcode = i32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]);
     if opcode != OP_MSG && opcode != OP_COMPRESSED { return None; }
-    if opcode == OP_COMPRESSED { return None; } // skip compressed for now
+    if opcode == OP_COMPRESSED { return decompress_op_compressed(buf); }
     // flags at offset 16, sections start at offset 20
     let mut pos = 20;
     while pos < buf.len() {
@@ -204,6 +204,51 @@ fn extract_body_doc(buf: &[u8]) -> Option<Vec<u8>> {
             // Kind 1: document sequence, skip
             if pos + 4 > buf.len() { return None; }
             let sec_len = i32::from_le_bytes([buf[pos], buf[pos+1], buf[pos+2], buf[pos+3]]) as usize;
+            pos += sec_len;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+/// Decompress an OP_COMPRESSED message and extract the body doc from the inner OP_MSG.
+fn decompress_op_compressed(buf: &[u8]) -> Option<Vec<u8>> {
+    if buf.len() < 25 { return None; }
+    let original_opcode = i32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]);
+    if original_opcode != OP_MSG { return None; }
+    let uncompressed_size = i32::from_le_bytes([buf[20], buf[21], buf[22], buf[23]]) as usize;
+    let compressor_id = buf[24];
+    let compressed = &buf[25..];
+
+    let decompressed = match compressor_id {
+        0 => compressed.to_vec(),
+        1 => snap::raw::Decoder::new().decompress_vec(compressed).ok()?,
+        2 => {
+            use std::io::Read;
+            let mut decoder = flate2::read::ZlibDecoder::new(compressed);
+            let mut out = Vec::with_capacity(uncompressed_size);
+            decoder.read_to_end(&mut out).ok()?;
+            out
+        }
+        3 => zstd::decode_all(compressed).ok()?,
+        _ => return None,
+    };
+
+    // decompressed = flags(4) + sections... (OP_MSG body without 16-byte header)
+    if decompressed.len() < 5 { return None; }
+    let mut pos = 4; // skip flags
+    while pos < decompressed.len() {
+        let kind = decompressed[pos];
+        pos += 1;
+        if kind == 0 {
+            if pos + 4 > decompressed.len() { return None; }
+            let doc_len = i32::from_le_bytes([decompressed[pos], decompressed[pos+1], decompressed[pos+2], decompressed[pos+3]]) as usize;
+            if pos + doc_len > decompressed.len() { return None; }
+            return Some(decompressed[pos..pos+doc_len].to_vec());
+        } else if kind == 1 {
+            if pos + 4 > decompressed.len() { return None; }
+            let sec_len = i32::from_le_bytes([decompressed[pos], decompressed[pos+1], decompressed[pos+2], decompressed[pos+3]]) as usize;
             pos += sec_len;
         } else {
             break;

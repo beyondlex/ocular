@@ -189,8 +189,26 @@ fn extract_produce_records(buf: &[u8]) -> Option<Vec<String>> {
         if !(0..=100_000).contains(&record_count) { continue; }
 
         if compression != 0 {
-            results.push(format!("({} record(s), compressed)", record_count));
-            return Some(results);
+            // Decompress records data
+            let compressed_start = pos + 57;
+            let compressed_end = pos + 12 + batch_len;
+            if compressed_start >= compressed_end { return None; }
+            let compressed = &buf[compressed_start..compressed_end];
+            let decompressed = decompress_kafka(compression, compressed)?;
+
+            let mut rpos = 0;
+            for _ in 0..record_count {
+                if rpos >= decompressed.len() { break; }
+                if let Some((value, consumed)) = parse_record(&decompressed, rpos, decompressed.len()) {
+                    if let Some(v) = value {
+                        results.push(v);
+                    }
+                    rpos += consumed;
+                } else {
+                    break;
+                }
+            }
+            return if results.is_empty() { None } else { Some(results) };
         }
 
         // Records start at offset +57 from batch start
@@ -338,6 +356,33 @@ fn find_first_string(buf: &[u8], pos: usize) -> Option<String> {
         }
     }
     None
+}
+
+/// Decompress Kafka record batch data.
+/// Compression types: 1=gzip, 2=snappy, 3=lz4, 4=zstd
+fn decompress_kafka(compression: i16, data: &[u8]) -> Option<Vec<u8>> {
+    match compression {
+        1 => {
+            use std::io::Read;
+            let mut decoder = flate2::read::GzDecoder::new(data);
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out).ok()?;
+            Some(out)
+        }
+        2 => {
+            snap::raw::Decoder::new().decompress_vec(data).ok()
+        }
+        3 => {
+            // Kafka LZ4 uses the standard frame format
+            use std::io::Read;
+            lz4_flex::frame::FrameDecoder::new(data)
+                .bytes().collect::<Result<Vec<u8>, _>>().ok()
+        }
+        4 => {
+            zstd::decode_all(data).ok()
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]
