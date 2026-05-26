@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.9.0 (2026-05-26)
+
+### New Features
+- **Aggregate stats** — QPS, latency, and error rate shown in component info popup
+- **Kafka/MongoDB decompression** — decompress Kafka records and MongoDB OP_COMPRESSED messages
+- **Distinct protocol colors** — unique colors for MongoDB, Kafka, HTTP, Memcached
+- **Proxy error events** — surface proxy errors as system events in TUI events panel
+- **Connection status indicators** — live connection state with 3s cooldown
+- **Auto-assign listen port** — simplify proxy form to 3 fields (name, protocol, remote)
+
+### Improvements
+- Show listen host/port fields in proxy form when editing
+- TUI performance: dirty-render, SkimMatcher cache, std Mutex, buffer pre-alloc
+
+### Bug Fixes
+- Fix proxy not waiting for pending response after client half-close
+- Fix memcached pipelining — process all commands per TCP read
+- Fix PostgreSQL parsing — buffer responses until ReadyForQuery, coalesce extended query protocol
+
 ## v0.8.0 (2026-05-26)
 
 ### New Features
