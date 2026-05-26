@@ -42,6 +42,8 @@ pub async fn run_proxy(
     let listener = match TcpListener::bind(&listen_addr).await {
         Ok(l) => l,
         Err(e) => {
+            let msg = format!("bind failed on {}: {}", listen_addr, e);
+            let _ = tx.send(ProxyEvent::system_event(&name, msg));
             status.lock().unwrap().entry(name.clone()).or_default().last_error = Some(format!("bind failed: {}", e));
             return Err(e.into());
         }
@@ -77,6 +79,7 @@ pub async fn run_proxy(
                     }
                     if let Err(e) = handle_conn(client, &remote, &name, protocol_for_conn, &tx, process, peer_addr, remote_for_conn).await {
                         warn!(component = %name, remote = %remote, error = %e, "connection ended with error");
+                        let _ = tx.send(ProxyEvent::system_event(&name, format!("connection error: {}", e)));
                         status.lock().unwrap().entry(name.clone()).or_default().last_error = Some(e.to_string());
                     }
                     let remaining = conn_count.fetch_sub(1, Ordering::Relaxed).saturating_sub(1);
@@ -121,6 +124,7 @@ async fn handle_conn(
         Err(e) => {
             error!(component = %name, remote = %actual_addr, error = %e,
                 "failed to connect to remote — is the service running?");
+            let _ = tx.send(ProxyEvent::system_event(name, format!("cannot reach {} ({})", actual_addr, e)));
             if protocol == Protocol::Redis {
                 let err_msg = format!("-ERR ocular proxy: cannot reach {} ({})\r\n", actual_addr, e);
                 let _ = client.write_all(err_msg.as_bytes()).await;
@@ -188,6 +192,7 @@ async fn handle_conn(
             process: process.clone(),
             src: Some(src.clone()),
             dest: Some(dest.clone()),
+                    system: false,
         });
         // If server said 'S' (SSL), we'd need to upgrade — but we don't support that
         // Most local setups respond 'N'
@@ -248,6 +253,7 @@ async fn handle_conn(
                                     process: process_req.clone(),
                                     src: Some(src_req.clone()),
                                     dest: Some(dest_req.clone()),
+                    system: false,
                                 });
                             } else {
                                 debug!(component = %name_req, command = %method.summary);
@@ -361,6 +367,7 @@ async fn handle_conn(
                                 process: process_mysql.clone(),
                                 src: Some(src_resp.clone()),
                                 dest: Some(dest_resp.clone()),
+                    system: false,
                             });
                         }
                         mysql_buf.clear();
@@ -386,6 +393,7 @@ async fn handle_conn(
                             process: process_info.clone(),
                                     src: Some(src_resp.clone()),
                                     dest: Some(dest_resp.clone()),
+                    system: false,
                         });
                     }
                     http_resp_buf.clear();
@@ -452,6 +460,7 @@ async fn handle_conn(
                             process: process_info.clone(),
                                     src: Some(src_resp.clone()),
                                     dest: Some(dest_resp.clone()),
+                    system: false,
                         });
                     } else if let Some(frame) = parse_amqp_frame(frame_data) {
                         // Server-initiated method (e.g. Basic.Deliver) — emit as standalone
@@ -471,6 +480,7 @@ async fn handle_conn(
                                 process: process_info.clone(),
                                     src: Some(dest_resp.clone()),
                                     dest: Some(src_resp.clone()),
+                    system: false,
                             });
                         }
                     }
@@ -501,6 +511,7 @@ async fn handle_conn(
                             process: process_info.clone(),
                                     src: Some(src_resp.clone()),
                                     dest: Some(dest_resp.clone()),
+                    system: false,
                         });
                     }
                 }
@@ -527,6 +538,7 @@ async fn handle_conn(
                                 process: process_info.clone(),
                                 src: Some(src_resp.clone()),
                                 dest: Some(dest_resp.clone()),
+                    system: false,
                             });
                         }
                         memcached_resp_buf.clear();
@@ -553,6 +565,7 @@ async fn handle_conn(
                             process: process_info.clone(),
                             src: Some(src_resp.clone()),
                             dest: Some(dest_resp.clone()),
+                    system: false,
                         });
                     }
                     kafka_resp_buf = kafka_resp_buf[frame_len..].to_vec();
@@ -575,6 +588,7 @@ async fn handle_conn(
                         process: process_info.clone(),
                         src: Some(src_resp.clone()),
                         dest: Some(dest_resp.clone()),
+                    system: false,
                     });
                 }
             }

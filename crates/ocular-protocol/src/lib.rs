@@ -39,6 +39,28 @@ pub struct ProxyEvent {
     pub src: Option<String>,
     /// Remote address (destination)
     pub dest: Option<String>,
+    /// Whether this is a system event (error/warning surfaced to TUI)
+    pub system: bool,
+}
+
+impl ProxyEvent {
+    /// Create a system event (error/warning) for display in the events panel
+    pub fn system_event(component: &str, message: String) -> Self {
+        Self {
+            timestamp: SystemTime::now(),
+            component: component.to_string(),
+            protocol: Protocol::Redis, // unused for system events
+            command: message.clone(),
+            full_command: message.clone(),
+            response: String::new(),
+            response_detail: message,
+            latency: Duration::ZERO,
+            process: None,
+            src: None,
+            dest: None,
+            system: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -53,6 +53,7 @@ pub async fn run_demo(tx: broadcast::Sender<ProxyEvent>) {
             process: None,
             src: Some("127.0.0.1:52431".to_string()),
             dest: Some("127.0.0.1:6379".to_string()),
+            system: false,
         });
         idx += 1;
         tokio::time::sleep(Duration::from_millis(300 + (idx as u64 * 37) % 400)).await;

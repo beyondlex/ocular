@@ -1013,10 +1013,13 @@ pub async fn run(
         }
 
         while let Ok(ev) = rx.try_recv() {
-            // Only accept events from components in the current group
-            if !app.components.iter().any(|c| c.name == ev.component) { continue; }
-            if let Some(matcher) = app.exclude_matchers.get(&ev.component) {
-                if matcher.is_excluded(&ev.command) { continue; }
+            // System events bypass component/exclude filters
+            if !ev.system {
+                // Only accept events from components in the current group
+                if !app.components.iter().any(|c| c.name == ev.component) { continue; }
+                if let Some(matcher) = app.exclude_matchers.get(&ev.component) {
+                    if matcher.is_excluded(&ev.command) { continue; }
+                }
             }
             if app.paused {
                 app.paused_buffer.push(ev);
@@ -2103,11 +2106,11 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Build "ALL" row with group name
     let all_label: Line = if let Some(ref group) = app.active_group {
         Line::from(vec![
-            Span::raw(if app.component_idx.is_none() { " ● All " } else { "   All " }),
+            Span::raw(if app.component_idx.is_none() { " > All " } else { "   All " }),
             Span::styled(format!("[{}]", group), Style::default().fg(Color::DarkGray)),
         ])
     } else {
-        Line::from(if app.component_idx.is_none() { " ● All" } else { "   All" })
+        Line::from(if app.component_idx.is_none() { " > All" } else { "   All" })
     };
     let all_style = if app.component_idx.is_none() && comp_focused {
         Style::default().bg(Color::DarkGray).fg(Color::White)
@@ -2129,7 +2132,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             fuzzy.fuzzy_match(&target, &app.component_filter).is_some()
         }).map(|(i, c)| {
             let selected = app.component_idx == Some(i);
-            let prefix = if selected { " ●" } else { "  " };
+            let prefix = if selected { " >" } else { "  " };
             let style = if selected && comp_focused {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else if selected {
@@ -2162,7 +2165,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     } else {
         items.extend(app.components.iter().enumerate().map(|(i, c)| {
             let selected = app.component_idx == Some(i);
-            let prefix = if selected { " ●" } else { "  " };
+            let prefix = if selected { " >" } else { "  " };
             let style = if selected && comp_focused {
                 Style::default().bg(Color::DarkGray).fg(Color::White)
             } else if selected {
@@ -2247,8 +2250,8 @@ fn ui(f: &mut Frame, app: &mut App) {
                         let (raw, style) = match name.as_str() {
                             "index" => (format!("{}", orig_idx + 1), theme.line_number),
                             "time" => (time.clone(), theme.timestamp),
-                            "component" => (ev.component.to_string(), theme.component_style(&ev.component)),
-                            "command" => (ev.command.clone(), theme.command),
+                            "component" => (ev.component.to_string(), if ev.system { Style::default().fg(Color::Red) } else { theme.component_style(&ev.component) }),
+                            "command" => (ev.command.clone(), if ev.system { Style::default().fg(Color::Red) } else { theme.command }),
                             "latency" => {
                                 let style = if app.latency_threshold_ms.is_some_and(|t| ev.latency.as_secs_f64() * 1000.0 > t) {
                                     Style::default().fg(Color::Red)
