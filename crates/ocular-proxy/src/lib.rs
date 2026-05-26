@@ -181,7 +181,7 @@ async fn handle_conn(
             let rn = sr.read(&mut resp).await?;
             if rn == 0 { return Ok(()); }
             // Always tell client: no SSL/GSS (force plaintext for proxy to parse)
-            client.write_all(&[b'N']).await?;
+            client.write_all(b"N").await?;
         } else {
             // Not a negotiation request, forward as Startup
             sw.write_all(data).await?;

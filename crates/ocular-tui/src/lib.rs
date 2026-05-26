@@ -922,8 +922,8 @@ pub async fn run(
                         AppMode::GroupDetail => {
                             if app.dashboard.detail_delete_confirm {
                                 match key.code {
-                                    KeyCode::Char('y') | KeyCode::Enter => {
-                                        if app.dashboard.detail_selected < app.dashboard.detail_proxies.len() {
+                                    KeyCode::Char('y') | KeyCode::Enter
+                                        if app.dashboard.detail_selected < app.dashboard.detail_proxies.len() => {
                                             app.dashboard.detail_proxies.remove(app.dashboard.detail_selected);
                                             if app.dashboard.detail_selected >= app.dashboard.detail_proxies.len() && !app.dashboard.detail_proxies.is_empty() {
                                                 app.dashboard.detail_selected = app.dashboard.detail_proxies.len() - 1;
@@ -945,7 +945,6 @@ pub async fn run(
                                             app.dashboard.detail_delete_confirm = false;
                                             continue;
                                         }
-                                    }
                                     _ => {}
                                 }
                                 app.dashboard.detail_delete_confirm = false;
@@ -1037,11 +1036,10 @@ pub async fn run(
                                         }
                                         app.mode = AppMode::Dashboard;
                                     }
-                                    KeyCode::Char('j') | KeyCode::Down => {
-                                        if app.dashboard.detail_selected + 1 < app.dashboard.detail_proxies.len() {
+                                    KeyCode::Char('j') | KeyCode::Down
+                                        if app.dashboard.detail_selected + 1 < app.dashboard.detail_proxies.len() => {
                                             app.dashboard.detail_selected += 1;
                                         }
-                                    }
                                     KeyCode::Char('k') | KeyCode::Up => {
                                         app.dashboard.detail_selected = app.dashboard.detail_selected.saturating_sub(1);
                                     }
@@ -1055,11 +1053,10 @@ pub async fn run(
                                             app.proxy_form = Some(form);
                                         }
                                     }
-                                    KeyCode::Char('d') => {
-                                        if !app.dashboard.detail_proxies.is_empty() {
+                                    KeyCode::Char('d')
+                                        if !app.dashboard.detail_proxies.is_empty() => {
                                             app.dashboard.detail_delete_confirm = true;
                                         }
-                                    }
                                     _ => {}
                                 }
                             }
@@ -2176,9 +2173,7 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                     };
                     form_lines.push(Line::from(display));
                 }
-                let error_line = if let Some(ref err) = form.error {
-                    Some(Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))))
-                } else { None };
+                let error_line = form.error.as_ref().map(|err| Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))));
                 let hint_line = Line::from(vec![
                     Span::raw("   "),
                     Span::styled("Esc", Style::default().fg(Color::DarkGray)), Span::raw(" cancel  "),
@@ -2878,11 +2873,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             lines.push(Line::from(display));
         }
         // Error line (if any)
-        let error_line = if let Some(ref err) = form.error {
-            Some(Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))))
-        } else {
-            None
-        };
+        let error_line = form.error.as_ref().map(|err| Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))));
         let hint_line = Line::from(vec![
             Span::raw("   "),
             Span::styled("Esc", Style::default().fg(Color::DarkGray)),
