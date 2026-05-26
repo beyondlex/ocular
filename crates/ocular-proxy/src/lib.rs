@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ocular_protocol::{Protocol, mysql::mysql_response_complete, postgres::postgres_response_complete, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -284,7 +284,25 @@ async fn handle_conn(
                 }
             } else if protocol == Protocol::Memcached {
                 memcached_req_buf.extend_from_slice(data);
-                if ocular_protocol::memcached::memcached_request_complete(&memcached_req_buf) {
+                while ocular_protocol::memcached::memcached_request_complete(&memcached_req_buf) {
+                    // If there's already a pending request that won't get a response pairing,
+                    // emit it as a standalone event
+                    if let Some(prev) = pending_w.lock().unwrap().take() {
+                        let _ = tx_req.send(ProxyEvent {
+                            timestamp: prev.timestamp,
+                            component: name_req.clone(),
+                            protocol,
+                            command: prev.command,
+                            full_command: prev.full_command,
+                            response: String::new(),
+                            response_detail: String::new(),
+                            latency: Duration::ZERO,
+                            process: process_req.clone(),
+                            src: Some(src_req.clone()),
+                            dest: Some(dest_req.clone()),
+                            system: false,
+                        });
+                    }
                     if let Some(command) = parse_request(protocol, &memcached_req_buf) {
                         let full_command = extract_full_command(protocol, &memcached_req_buf).unwrap_or_else(|| command.clone());
                         *pending_w.lock().unwrap() = Some(PendingRequest {
@@ -294,7 +312,20 @@ async fn handle_conn(
                             full_command,
                         });
                     }
-                    memcached_req_buf.clear();
+                    // Advance past this request
+                    let s = std::str::from_utf8(&memcached_req_buf).unwrap_or("");
+                    let first_crlf = s.find("\r\n").unwrap_or(0);
+                    let line = &s[..first_crlf];
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    let cmd = parts.first().map(|c| c.to_uppercase()).unwrap_or_default();
+                    let consumed = match cmd.as_str() {
+                        "SET" | "ADD" | "REPLACE" | "APPEND" | "PREPEND" | "CAS" => {
+                            let bytes: usize = parts.get(4).and_then(|b| b.parse().ok()).unwrap_or(0);
+                            first_crlf + 2 + bytes + 2
+                        }
+                        _ => first_crlf + 2,
+                    };
+                    memcached_req_buf = memcached_req_buf[consumed..].to_vec();
                 }
             } else if protocol == Protocol::Kafka {
                 kafka_req_buf.extend_from_slice(data);
