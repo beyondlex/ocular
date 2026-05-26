@@ -249,6 +249,73 @@ struct GroupPicker {
     selected: usize,
 }
 
+/// Per-component aggregate statistics
+#[derive(Default)]
+struct ComponentStats {
+    count: u64,
+    error_count: u64,
+    latency_sum: Duration,
+    latency_min: Duration,
+    latency_max: Duration,
+    /// Sorted latencies for p95 (capped to avoid unbounded memory)
+    latencies: Vec<Duration>,
+    first_event: Option<SystemTime>,
+    last_event: Option<SystemTime>,
+}
+
+impl ComponentStats {
+    fn record(&mut self, ev: &ProxyEvent) {
+        self.count += 1;
+        if ev.response.starts_with("ERR") || ev.response.starts_with("ERROR") {
+            self.error_count += 1;
+        }
+        if ev.system { return; }
+        let lat = ev.latency;
+        if lat > Duration::ZERO {
+            self.latency_sum += lat;
+            if self.latency_min == Duration::ZERO || lat < self.latency_min {
+                self.latency_min = lat;
+            }
+            if lat > self.latency_max {
+                self.latency_max = lat;
+            }
+            self.latencies.push(lat);
+        }
+        let ts = ev.timestamp;
+        if self.first_event.is_none() { self.first_event = Some(ts); }
+        self.last_event = Some(ts);
+    }
+
+    fn avg_latency(&self) -> Duration {
+        let n = self.latencies.len() as u64;
+        if n == 0 { return Duration::ZERO; }
+        self.latency_sum / n as u32
+    }
+
+    fn p95_latency(&self) -> Duration {
+        if self.latencies.is_empty() { return Duration::ZERO; }
+        let mut sorted = self.latencies.clone();
+        sorted.sort();
+        let idx = (sorted.len() as f64 * 0.95) as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    fn qps(&self) -> f64 {
+        match (self.first_event, self.last_event) {
+            (Some(first), Some(last)) => {
+                let elapsed = last.duration_since(first).unwrap_or(Duration::ZERO).as_secs_f64();
+                if elapsed < 1.0 { self.count as f64 } else { self.count as f64 / elapsed }
+            }
+            _ => 0.0,
+        }
+    }
+
+    fn error_rate(&self) -> f64 {
+        if self.count == 0 { return 0.0; }
+        self.error_count as f64 / self.count as f64 * 100.0
+    }
+}
+
 struct App {
     events: Vec<ProxyEvent>,
     selected: usize,
@@ -286,6 +353,7 @@ struct App {
     dashboard: DashboardState,
     main_config_path: PathBuf,
     status_map: StatusMap,
+    component_stats: std::collections::HashMap<String, ComponentStats>,
     // Cached resources
     fuzzy_matcher: SkimMatcherV2,
     dirty: bool,
@@ -552,6 +620,7 @@ pub async fn run(
         ),
         main_config_path: main_config_path.clone(),
         status_map,
+        component_stats: std::collections::HashMap::new(),
         fuzzy_matcher: SkimMatcherV2::default(),
         dirty: true,
         cached_filtered_indices: Vec::new(),
@@ -1022,8 +1091,10 @@ pub async fn run(
                 }
             }
             if app.paused {
+                app.component_stats.entry(ev.component.clone()).or_default().record(&ev);
                 app.paused_buffer.push(ev);
             } else {
+                app.component_stats.entry(ev.component.clone()).or_default().record(&ev);
                 app.events.push(ev);
                 app.dirty = true;
                 if app.follow && app.focus == Focus::Events && app.filter.is_empty() {
@@ -2725,14 +2796,38 @@ fn ui(f: &mut Frame, app: &mut App) {
                     }
                 }
             }
-            let count = app.events.iter().filter(|ev| ev.component == ci.name).count();
+            let stats = app.component_stats.get(&ci.name);
+            let count = stats.map_or(0, |s| s.count);
             lines.push(Line::from(vec![
                 Span::styled(" events: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(count.to_string(), Style::default().fg(Color::Yellow)),
             ]));
+            if let Some(s) = stats {
+                lines.push(Line::from(vec![
+                    Span::styled(" qps:    ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(format!("{:.1}", s.qps())),
+                ]));
+                if !s.latencies.is_empty() {
+                    lines.push(Line::from(vec![
+                        Span::styled(" latency: ", Style::default().fg(Color::DarkGray)),
+                        Span::raw(format!("min={:.2}ms avg={:.2}ms max={:.2}ms p95={:.2}ms",
+                            s.latency_min.as_secs_f64() * 1000.0,
+                            s.avg_latency().as_secs_f64() * 1000.0,
+                            s.latency_max.as_secs_f64() * 1000.0,
+                            s.p95_latency().as_secs_f64() * 1000.0,
+                        )),
+                    ]));
+                }
+                if s.error_count > 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(" errors: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("{} ({:.1}%)", s.error_count, s.error_rate()), Style::default().fg(Color::Red)),
+                    ]));
+                }
+            }
 
             let area = f.area();
-            let w: u16 = 44;
+            let w: u16 = 60;
             let h = lines.len() as u16 + 2;
             let x = (area.width.saturating_sub(w)) / 2;
             let y = (area.height.saturating_sub(h)) / 2;
