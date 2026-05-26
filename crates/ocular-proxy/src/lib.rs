@@ -163,39 +163,29 @@ async fn handle_conn(
         debug!(component = %name, "forwarded MySQL greeting with SSL stripped");
     }
 
-    // For PostgreSQL: handle SSL negotiation before normal flow
+    // For PostgreSQL: strip SSL by forwarding negotiation to server but replying N to client.
+    // This lets the server know the connection won't be encrypted (may affect auth requirements).
     if protocol == Protocol::Postgres {
         let mut buf = [0u8; 256];
         let n = client.read(&mut buf).await?;
         if n == 0 { return Ok(()); }
         let data = &buf[..n];
-        // Forward SSLRequest to server
-        sw.write_all(data).await?;
-        // Read server's SSL response (single byte N or S)
-        let mut resp = [0u8; 1];
-        let rn = sr.read(&mut resp).await?;
-        if rn == 0 { return Ok(()); }
-        // Forward to client
-        client.write_all(&resp[..rn]).await?;
-        // Emit SSLRequest event
-        let command = parse_request(protocol, data).unwrap_or_else(|| "SSLRequest".into());
-        let response = if resp[0] == b'N' { "SSLResponse: No" } else { "SSLResponse: Yes" };
-        let _ = tx.send(ProxyEvent {
-            timestamp: SystemTime::now(),
-            component: name.to_string(),
-            protocol,
-            command: command.clone(),
-            full_command: command,
-            response: response.into(),
-            response_detail: response.into(),
-            latency: std::time::Duration::ZERO,
-            process: process.clone(),
-            src: Some(src.clone()),
-            dest: Some(dest.clone()),
-                    system: false,
-        });
-        // If server said 'S' (SSL), we'd need to upgrade — but we don't support that
-        // Most local setups respond 'N'
+        let neg_code = if n >= 8 {
+            u32::from_be_bytes([data[4], data[5], data[6], data[7]])
+        } else { 0 };
+        if neg_code == 80877103 || neg_code == 80877104 {
+            // Forward negotiation to server so it knows the connection state
+            sw.write_all(data).await?;
+            // Read server's response (single byte: N or S)
+            let mut resp = [0u8; 1];
+            let rn = sr.read(&mut resp).await?;
+            if rn == 0 { return Ok(()); }
+            // Always tell client: no SSL/GSS (force plaintext for proxy to parse)
+            client.write_all(&[b'N']).await?;
+        } else {
+            // Not a negotiation request, forward as Startup
+            sw.write_all(data).await?;
+        }
     }
 
     let (mut cr, mut cw) = client.split();
@@ -350,7 +340,7 @@ async fn handle_conn(
                 while pos < data.len() {
                     let first = data[pos];
                     let is_typed = matches!(first, b'Q' | b'P' | b'B' | b'E' | b'D' | b'S' | b'X' | b'C' | b'p' | b'H' | b'F' | b'd' | b'c' | b'f');
-                    if !is_typed { break; } // startup/untyped — stop
+                    if !is_typed { break; }
                     if pos + 5 > data.len() { break; }
                     let len = u32::from_be_bytes([data[pos+1], data[pos+2], data[pos+3], data[pos+4]]) as usize;
                     let end = pos + 1 + len;

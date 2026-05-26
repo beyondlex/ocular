@@ -97,7 +97,6 @@ enum AppMode {
     Dashboard,
     GroupDetail,
     NewGroupName,
-    NewGroupAddProxy,
     RenameGroup,
     Main,
 }
@@ -199,7 +198,7 @@ fn default_port(protocol: &str) -> &'static str {
 #[derive(Default)]
 struct ProxyForm {
     /// [name, listen_host, listen_port, remote_host, remote_port, interface]
-    fields: [String; 6],
+    inputs: [tui_input::Input; 6],
     active_field: usize,
     editing_idx: Option<usize>,
     protocol_idx: usize,
@@ -210,6 +209,7 @@ struct ProxyForm {
 }
 
 const MODES: &[&str] = &["proxy", "capture"];
+const DEFAULT_IFACE: &str = if cfg!(target_os = "macos") { "lo0" } else { "lo" };
 
 impl ProxyForm {
     /// Map active_field (row index) to fields[] index.
@@ -269,7 +269,14 @@ impl ProxyForm {
         let (rh, rp) = split_addr(&entry.remote);
         let (lh, lp) = split_addr(&entry.listen);
         Self {
-            fields: [entry.name.clone(), lh, lp, rh, rp, entry.interface.clone()],
+            inputs: [
+                tui_input::Input::new(entry.name.clone()),
+                tui_input::Input::new(lh),
+                tui_input::Input::new(lp),
+                tui_input::Input::new(rh),
+                tui_input::Input::new(rp),
+                tui_input::Input::new(entry.interface.clone()),
+            ],
             active_field: 0,
             editing_idx: None,
             protocol_idx,
@@ -871,84 +878,22 @@ pub async fn run(
                                         app.dashboard.error = Some(format!("group \"{}\" already exists", name));
                                     } else {
                                         app.dashboard.error = None;
-                                        app.mode = AppMode::NewGroupAddProxy;
+                                        // Create empty group file and enter GroupDetail
+                                        if let Some(ref gdir) = app.group_dir.clone() {
+                                            let file = gdir.join(format!("{}.toml", name));
+                                            let _ = std::fs::write(&file, "");
+                                            app.dashboard = DashboardState::load(gdir, &app.main_config_path);
+                                        }
+                                        app.dashboard.detail_group_name = name;
+                                        app.dashboard.detail_proxies = Vec::new();
+                                        app.dashboard.detail_selected = 0;
+                                        app.proxy_form = None;
+                                        app.mode = AppMode::GroupDetail;
                                     }
                                 }
                                 KeyCode::Backspace => { app.dashboard.new_group_name.pop(); app.dashboard.error = None; }
                                 KeyCode::Char(c) => { app.dashboard.new_group_name.push(c); app.dashboard.error = None; }
                                 _ => {}
-                            }
-                        }
-                        AppMode::NewGroupAddProxy => {
-                            // Reuse proxy form logic inline
-                            if app.proxy_form.is_none() {
-                                // Show proxy list with option to add more or finish
-                                match key.code {
-                                    KeyCode::Esc => {
-                                        // Save group and go back to dashboard
-                                        if let Some(ref gdir) = app.group_dir.clone() {
-                                            let name = &app.dashboard.new_group_name;
-                                            let file = gdir.join(format!("{}.toml", name));
-                                            let mut content = String::new();
-                                            for p in &app.dashboard.new_group_proxies {
-                                                content.push_str(&format_proxy_toml(&p.name, &p.protocol, &p.listen, &p.remote, &p.mode, &p.interface));
-                                            }
-                                            let _ = std::fs::write(&file, content);
-                                            app.dashboard = DashboardState::load(gdir, &app.main_config_path);
-                                        }
-                                        app.mode = AppMode::Dashboard;
-                                    }
-                                    KeyCode::Char('n') | KeyCode::Enter => {
-                                        app.proxy_form = Some(ProxyForm::default());
-                                    }
-                                    _ => {}
-                                }
-                            } else {
-                                // Proxy form active
-                                if let Some(ref mut form) = app.proxy_form {
-                                    match key.code {
-                                        KeyCode::Esc => { app.proxy_form = None; }
-                                        KeyCode::Tab => { let fc = form.row_count(); form.active_field = (form.active_field + 1) % fc; form.error = None; }
-                                        KeyCode::BackTab => { let fc = form.row_count(); form.active_field = (form.active_field + fc - 1) % fc; form.error = None; }
-                                        KeyCode::Enter => {
-                                            let protocol = PROTOCOLS[form.protocol_idx];
-                                            let name = form.fields[0].trim().to_string();
-                                            let remote_host = if form.fields[3].is_empty() { "127.0.0.1" } else { form.fields[3].trim() };
-                                            let remote_port = if form.fields[4].is_empty() { default_port(protocol) } else { form.fields[4].trim() };
-                                            if name.is_empty() {
-                                                form.error = Some("name is required".into());
-                                            } else if app.dashboard.new_group_proxies.iter().any(|p| p.name == name) {
-                                                form.error = Some(format!("name \"{}\" already exists", name));
-                                            } else {
-                                                let mode_str = MODES[form.mode_idx].to_string();
-                                                let iface = form.fields[5].clone();
-                                                let listen = if form.mode_idx == 1 { String::new() } else { auto_assign_listen_port(protocol) };
-                                                let remote = format!("{}:{}", remote_host, remote_port);
-                                                app.dashboard.new_group_proxies.push(NewProxyEntry {
-                                                    name, protocol: protocol.to_string(), listen, remote, mode: mode_str, interface: iface,
-                                                });
-                                                app.proxy_form = None;
-                                            }
-                                        }
-                                        KeyCode::Left if form.active_field == 1 => { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
-                                        KeyCode::Right if form.active_field == 1 => { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
-                                        KeyCode::Left if form.active_field == 2 => { form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
-                                        KeyCode::Right if form.active_field == 2 => { form.mode_idx = (form.mode_idx + 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
-                                        KeyCode::Backspace => {
-                                            if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
-                                            else if form.active_field == 2 { form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
-                                            else if let Some(fi) = form.field_idx() { form.fields[fi].pop(); }
-                                            form.error = None;
-                                        }
-                                        KeyCode::Char(c) => {
-                                            if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
-                                            else if form.active_field == 2 { form.mode_idx = (form.mode_idx + 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
-                                            else if let Some(fi) = form.field_idx() { form.fields[fi].push(c); }
-                                            form.error = None;
-                                        }
-                                        _ => {}
-                                    }
-                                }
                             }
                         }
                         AppMode::RenameGroup => {
@@ -1013,9 +958,9 @@ pub async fn run(
                                     KeyCode::BackTab => { let fc = form.row_count(); form.active_field = (form.active_field + fc - 1) % fc; form.error = None; }
                                     KeyCode::Enter => {
                                         let protocol = PROTOCOLS[form.protocol_idx];
-                                        let name = form.fields[0].trim().to_string();
-                                        let remote_host = if form.fields[3].is_empty() { "127.0.0.1" } else { form.fields[3].trim() };
-                                        let remote_port = if form.fields[4].is_empty() { default_port(protocol) } else { form.fields[4].trim() };
+                                        let name = form.inputs[0].value().trim().to_string();
+                                        let remote_host = if form.inputs[3].value().is_empty() { "127.0.0.1" } else { form.inputs[3].value().trim() };
+                                        let remote_port = if form.inputs[4].value().is_empty() { default_port(protocol) } else { form.inputs[4].value().trim() };
                                         if name.is_empty() {
                                             form.error = Some("name is required".into());
                                         } else if app.dashboard.detail_proxies.iter().any(|p| p.name == name)
@@ -1025,16 +970,16 @@ pub async fn run(
                                             let is_capture = form.mode_idx == 1;
                                             let listen = if is_capture {
                                                 String::new()
-                                            } else if form.editing_idx.is_some() && (!form.fields[1].is_empty() || !form.fields[2].is_empty()) {
-                                                let lh = if form.fields[1].is_empty() { "127.0.0.1" } else { form.fields[1].trim() };
-                                                let lp = if form.fields[2].is_empty() { "0" } else { form.fields[2].trim() };
+                                            } else if form.editing_idx.is_some() && (!form.inputs[1].value().is_empty() || !form.inputs[2].value().is_empty()) {
+                                                let lh = if form.inputs[1].value().is_empty() { "127.0.0.1" } else { form.inputs[1].value().trim() };
+                                                let lp = if form.inputs[2].value().is_empty() { "0" } else { form.inputs[2].value().trim() };
                                                 format!("{}:{}", lh, lp)
                                             } else {
                                                 form.existing_listen.clone().unwrap_or_else(|| auto_assign_listen_port(protocol))
                                             };
                                             let remote = format!("{}:{}", remote_host, remote_port);
                                             let mode_str = MODES[form.mode_idx].to_string();
-                                            let iface = form.fields[5].clone();
+                                            let iface = form.inputs[5].value().to_string();
                                             if let Some(idx) = form.editing_idx {
                                                 if idx < app.dashboard.detail_proxies.len() {
                                                     app.dashboard.detail_proxies[idx] = NewProxyEntry {
@@ -1070,13 +1015,16 @@ pub async fn run(
                                     KeyCode::Backspace => {
                                         if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
                                         else if form.active_field == 2 { form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
-                                        else if let Some(fi) = form.field_idx() { form.fields[fi].pop(); }
+                                        else if let Some(fi) = form.field_idx() { form.inputs[fi].handle(tui_input::InputRequest::DeletePrevChar); }
                                         form.error = None;
                                     }
                                     KeyCode::Char(c) => {
-                                        if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
-                                        else if form.active_field == 2 { form.mode_idx = (form.mode_idx + 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
-                                        else if let Some(fi) = form.field_idx() { form.fields[fi].push(c); }
+                                        if form.active_field == 1 {
+                                            match c { 'h' | 'k' => form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(), 'l' | 'j' => form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(), _ => {} }
+                                        } else if form.active_field == 2 {
+                                            match c { 'h' | 'k' => form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len(), 'l' | 'j' => form.mode_idx = (form.mode_idx + 1) % MODES.len(), _ => {} }
+                                            form.active_field = form.active_field.min(form.row_count() - 1);
+                                        } else if let Some(fi) = form.field_idx() { form.inputs[fi].handle(tui_input::InputRequest::InsertChar(c)); }
                                         form.error = None;
                                     }
                                     _ => {}
@@ -1265,9 +1213,9 @@ pub async fn run(
                         KeyCode::BackTab => { form.active_field = (form.active_field + field_count - 1) % field_count; form.error = None; }
                         KeyCode::Enter => {
                             let protocol = PROTOCOLS[form.protocol_idx];
-                            let name = form.fields[0].trim().to_string();
-                            let remote_host = if form.fields[3].is_empty() { "127.0.0.1" } else { form.fields[3].trim() };
-                            let remote_port = if form.fields[4].is_empty() { default_port(protocol) } else { form.fields[4].trim() };
+                            let name = form.inputs[0].value().trim().to_string();
+                            let remote_host = if form.inputs[3].value().is_empty() { "127.0.0.1" } else { form.inputs[3].value().trim() };
+                            let remote_port = if form.inputs[4].value().is_empty() { default_port(protocol) } else { form.inputs[4].value().trim() };
 
                             // Validation
                             if name.is_empty() {
@@ -1283,20 +1231,19 @@ pub async fn run(
                                     form.error = Some(format!("name \"{}\" already exists", name));
                                 } else {
                                     let is_capture = form.mode_idx == 1;
-                                    if is_capture && form.fields[5].trim().is_empty() {
-                                        form.error = Some("interface is required for capture mode".into());
-                                    } else {
                                     let listen_addr = if is_capture {
                                         String::new()
-                                    } else if form.editing_idx.is_some() && (!form.fields[1].is_empty() || !form.fields[2].is_empty()) {
-                                        let lh = if form.fields[1].is_empty() { "127.0.0.1" } else { form.fields[1].trim() };
-                                        let lp = if form.fields[2].is_empty() { "0" } else { form.fields[2].trim() };
+                                    } else if form.editing_idx.is_some() && (!form.inputs[1].value().is_empty() || !form.inputs[2].value().is_empty()) {
+                                        let lh = if form.inputs[1].value().is_empty() { "127.0.0.1" } else { form.inputs[1].value().trim() };
+                                        let lp = if form.inputs[2].value().is_empty() { "0" } else { form.inputs[2].value().trim() };
                                         format!("{}:{}", lh, lp)
                                     } else {
                                         form.existing_listen.clone().unwrap_or_else(|| auto_assign_listen_port(protocol))
                                     };
                                     let mode_str = MODES[form.mode_idx];
-                                    let iface = form.fields[5].trim().to_string();
+                                    let iface = if form.inputs[5].value().trim().is_empty() {
+                                        DEFAULT_IFACE.to_string()
+                                    } else { form.inputs[5].value().trim().to_string() };
                                     {
                                         let remote_addr = format!("{}:{}", remote_host, remote_port);
                                         let editing_idx = form.editing_idx;
@@ -1317,7 +1264,6 @@ pub async fn run(
                                         }
                                         save_proxy_config(&app.config_path, &app.components, protocol, editing_idx, &name, &listen_addr, &remote_addr, mode_str, &iface);
                                     }
-                                    }
                                 }
                             }
                         }
@@ -1335,6 +1281,32 @@ pub async fn run(
                             form.mode_idx = (form.mode_idx + 1) % MODES.len();
                             form.active_field = form.active_field.min(form.row_count() - 1);
                         }
+                        KeyCode::Left => {
+                            if let Some(fi) = form.field_idx() {
+                                use tui_input::InputRequest as IR;
+                                let req = if key.modifiers.contains(crossterm::event::KeyModifiers::SUPER) {
+                                    IR::GoToStart
+                                } else if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+                                    IR::GoToPrevWord
+                                } else {
+                                    IR::GoToPrevChar
+                                };
+                                form.inputs[fi].handle(req);
+                            }
+                        }
+                        KeyCode::Right => {
+                            if let Some(fi) = form.field_idx() {
+                                use tui_input::InputRequest as IR;
+                                let req = if key.modifiers.contains(crossterm::event::KeyModifiers::SUPER) {
+                                    IR::GoToEnd
+                                } else if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+                                    IR::GoToNextWord
+                                } else {
+                                    IR::GoToNextChar
+                                };
+                                form.inputs[fi].handle(req);
+                            }
+                        }
                         KeyCode::Backspace => {
                             if form.active_field == 1 {
                                 form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len();
@@ -1342,23 +1314,40 @@ pub async fn run(
                                 form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len();
                                 form.active_field = form.active_field.min(form.row_count() - 1);
                             } else if let Some(fi) = form.field_idx() {
-                                form.fields[fi].pop();
+                                use tui_input::InputRequest as IR;
+                                let req = if key.modifiers.contains(crossterm::event::KeyModifiers::SUPER) {
+                                    IR::DeleteLine
+                                } else if key.modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+                                    IR::DeletePrevWord
+                                } else {
+                                    IR::DeletePrevChar
+                                };
+                                form.inputs[fi].handle(req);
                             }
                             form.error = None;
                         }
                         KeyCode::Char(c) => {
                             if form.active_field == 1 {
-                                form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len();
+                                match c {
+                                    'h' | 'k' => form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(),
+                                    'l' | 'j' => form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(),
+                                    _ => {}
+                                }
                             } else if form.active_field == 2 {
-                                form.mode_idx = (form.mode_idx + 1) % MODES.len();
+                                match c {
+                                    'h' | 'k' => form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len(),
+                                    'l' | 'j' => form.mode_idx = (form.mode_idx + 1) % MODES.len(),
+                                    _ => {}
+                                }
                                 form.active_field = form.active_field.min(form.row_count() - 1);
                             } else if let Some(fi) = form.field_idx() {
-                                form.fields[fi].push(c);
+                                form.inputs[fi].handle(tui_input::InputRequest::InsertChar(c));
                             }
                             form.error = None;
                         }
                         _ => {}
                     }
+                    app.dirty = true;
                     continue;
                 }
 
@@ -1734,7 +1723,14 @@ pub async fn run(
                         if let Some(idx) = app.component_idx {
                             if let Some(ci) = app.components.get(idx) {
                                 let mut form = ProxyForm {
-                                    fields: [ci.name.clone(), String::new(), String::new(), String::new(), String::new(), String::new()],
+                                    inputs: [
+                                        tui_input::Input::new(ci.name.clone()),
+                                        tui_input::Input::default(),
+                                        tui_input::Input::default(),
+                                        tui_input::Input::default(),
+                                        tui_input::Input::default(),
+                                        tui_input::Input::default(),
+                                    ],
                                     active_field: 0,
                                     editing_idx: Some(idx),
                                     protocol_idx: 0,
@@ -1748,12 +1744,12 @@ pub async fn run(
                                             form.protocol_idx = PROTOCOLS.iter().position(|&x| x == p.protocol).unwrap_or(0);
                                             form.mode_idx = if p.mode.as_deref() == Some("capture") { 1 } else { 0 };
                                             let (rh, rp) = split_addr(&p.remote);
-                                            form.fields[3] = rh;
-                                            form.fields[4] = rp;
+                                            form.inputs[3] = tui_input::Input::new(rh);
+                                            form.inputs[4] = tui_input::Input::new(rp);
                                             let (lh, lp) = split_addr(&ci.listen);
-                                            form.fields[1] = lh;
-                                            form.fields[2] = lp;
-                                            form.fields[5] = p.interface.clone().unwrap_or_default();
+                                            form.inputs[1] = tui_input::Input::new(lh);
+                                            form.inputs[2] = tui_input::Input::new(lp);
+                                            form.inputs[5] = tui_input::Input::new(p.interface.clone().unwrap_or_default());
                                         }
                                     }
                                 }
@@ -1924,7 +1920,7 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
             }
             lines.push(Line::from(""));
 
-            let box_h = lines.len() as u16 + 2;
+            let box_h = (lines.len() as u16 + 2).min(main_area.height.saturating_sub(6));
             let art_h: u16 = 4; // 3 lines ASCII art + 1 line version
             let gap: u16 = 1;
             let x = (main_area.width.saturating_sub(box_w)) / 2;
@@ -2059,95 +2055,6 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                 f.render_widget(hint, hint_area);
             }
         }
-        AppMode::NewGroupAddProxy => {
-            let mut lines: Vec<Line> = Vec::new();
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(format!(" Group: {}", app.dashboard.new_group_name), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
-            lines.push(Line::from(""));
-
-            if app.dashboard.new_group_proxies.is_empty() {
-                lines.push(Line::from(Span::styled(" No proxies yet", Style::default().fg(Color::DarkGray))));
-            } else {
-                for p in &app.dashboard.new_group_proxies {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("  {} ", p.name), Style::default().fg(Color::White)),
-                        Span::styled(format!("({} → {})", p.listen, p.remote), Style::default().fg(Color::DarkGray)),
-                    ]));
-                }
-            }
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(" n/Enter: add proxy  Esc: save & back", Style::default().fg(Color::DarkGray))));
-
-            let box_h = lines.len() as u16 + 2;
-            let x = (main_area.width.saturating_sub(box_w)) / 2;
-            let y = (main_area.height.saturating_sub(box_h)) / 2;
-            let box_area = Rect::new(x, y, box_w, box_h);
-            let block = Block::default().borders(Borders::ALL)
-                .border_type(ratatui::widgets::BorderType::Rounded)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(" New Group ");
-            f.render_widget(Paragraph::new(lines).block(block), box_area);
-
-            // Proxy form popup if active
-            if let Some(ref form) = app.proxy_form {
-                let fw: u16 = 50;
-                let fh: u16 = if form.editing_idx.is_some() { 13 } else { 11 };
-                let fx = (area.width.saturating_sub(fw)) / 2;
-                let fy = (area.height.saturating_sub(fh)) / 2;
-                let popup_area = Rect::new(fx, fy, fw, fh);
-                f.render_widget(Clear, popup_area);
-
-                let protocol = PROTOCOLS[form.protocol_idx];
-                let mode = MODES[form.mode_idx];
-                let remote_default_port = default_port(protocol);
-                let mut rows: Vec<(usize, &str, &str, &str)> = vec![
-                    (0, "name", &form.fields[0], ""),
-                    (1, "protocol", protocol, ""),
-                    (2, "mode", mode, ""),
-                ];
-                if form.mode_idx == 1 {
-                    rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
-                    rows.push((4, "remote port", &form.fields[4], remote_default_port));
-                    rows.push((5, "interface", &form.fields[5], "lo0"));
-                } else if form.editing_idx.is_some() {
-                    rows.push((3, "listen host", &form.fields[1], "127.0.0.1"));
-                    rows.push((4, "listen port", &form.fields[2], ""));
-                    rows.push((5, "remote host", &form.fields[3], "127.0.0.1"));
-                    rows.push((6, "remote port", &form.fields[4], remote_default_port));
-                } else {
-                    rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
-                    rows.push((4, "remote port", &form.fields[4], remote_default_port));
-                }
-                let mut form_lines: Vec<Line> = Vec::new();
-                for &(i, label, value, placeholder) in &rows {
-                    let cursor = if i == form.active_field { "▌" } else { "" };
-                    let label_style = if i == form.active_field { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) };
-                    let hint = if (i == 1 || i == 2) && i == form.active_field { " ◀ ▶" } else { "" };
-                    let display = if value.is_empty() && !placeholder.is_empty() && i != form.active_field {
-                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(placeholder.to_string(), Style::default().fg(Color::Rgb(80, 80, 80)))]
-                    } else if value.is_empty() && !placeholder.is_empty() {
-                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(cursor.to_string(), Style::default().fg(Color::White)), Span::styled(format!(" ({})", placeholder), Style::default().fg(Color::Rgb(80, 80, 80)))]
-                    } else {
-                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(format!("{}{}", value, cursor), Style::default().fg(Color::White)), Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray))]
-                    };
-                    form_lines.push(Line::from(display));
-                }
-                form_lines.push(Line::from(""));
-                if let Some(ref err) = form.error {
-                    form_lines.push(Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))));
-                }
-                form_lines.push(Line::from(vec![
-                    Span::raw("   "),
-                    Span::styled("Esc", Style::default().fg(Color::DarkGray)), Span::raw(" cancel  "),
-                    Span::styled("Enter", Style::default().fg(Color::Green)), Span::raw(" save"),
-                ]));
-                let popup = Paragraph::new(form_lines)
-                    .block(Block::default().borders(Borders::ALL)
-                        .border_type(ratatui::widgets::BorderType::Rounded)
-                        .border_style(Style::default().fg(Color::Cyan)).title(if form.editing_idx.is_some() { " Edit Proxy " } else { " Add Proxy " }));
-                f.render_widget(popup, popup_area);
-            }
-        }
         AppMode::GroupDetail => {
             let mut lines: Vec<Line> = Vec::new();
             lines.push(Line::from(""));
@@ -2160,8 +2067,20 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
             if app.dashboard.detail_proxies.is_empty() {
                 lines.push(Line::from(Span::styled(" No proxies", Style::default().fg(Color::DarkGray))));
             } else {
-                for (i, p) in app.dashboard.detail_proxies.iter().enumerate() {
-                    let is_selected = i == app.dashboard.detail_selected;
+                // Scrolling: calculate visible window based on available height
+                // Reserve: 3 header lines + 2 footer lines + 2 borders = 7
+                let max_items = (main_area.height as usize).saturating_sub(9);
+                let total = app.dashboard.detail_proxies.len();
+                let selected = app.dashboard.detail_selected;
+                let scroll_start = if selected < max_items {
+                    0
+                } else {
+                    selected - max_items + 1
+                };
+                let visible_end = (scroll_start + max_items).min(total);
+                for i in scroll_start..visible_end {
+                    let p = &app.dashboard.detail_proxies[i];
+                    let is_selected = i == selected;
                     let prefix = if is_selected { " ▸ " } else { "   " };
                     let name_style = if is_selected {
                         Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
@@ -2170,9 +2089,16 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                     };
                     lines.push(Line::from(vec![
                         Span::styled(prefix, Style::default().fg(Color::Cyan)),
-                        Span::styled(format!("{:<10}", p.name), name_style),
+                        Span::styled(if p.mode == "capture" { "⊙" } else { "⇄" }, Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!(" {:<10}", p.name), name_style),
                         Span::styled(format!(" {} \u{2192} {} ", p.listen, p.remote), Style::default().fg(Color::DarkGray)),
                     ]));
+                }
+                if visible_end < total {
+                    lines.push(Line::from(Span::styled(
+                        format!(" ({}/{})", selected + 1, total),
+                        Style::default().fg(Color::DarkGray),
+                    )));
                 }
             }
             lines.push(Line::from(""));
@@ -2183,7 +2109,7 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                 )));
             }
 
-            let box_h = lines.len() as u16 + 2;
+            let box_h = (lines.len() as u16 + 2).min(main_area.height.saturating_sub(2));
             let x = (main_area.width.saturating_sub(box_w)) / 2;
             let y = (main_area.height.saturating_sub(box_h)) / 2;
             let box_area = Rect::new(x, y, box_w, box_h);
@@ -2200,8 +2126,8 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
 
             // Proxy form popup
             if let Some(ref form) = app.proxy_form {
-                let fw: u16 = 50;
-                let fh: u16 = if form.editing_idx.is_some() { 13 } else { 11 };
+                let fw: u16 = 42;
+                let fh: u16 = 13;
                 let fx = (area.width.saturating_sub(fw)) / 2;
                 let fy = (area.height.saturating_sub(fh)) / 2;
                 let popup_area = Rect::new(fx, fy, fw, fh);
@@ -2211,46 +2137,59 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                 let mode = MODES[form.mode_idx];
                 let remote_default_port = default_port(protocol);
                 let mut rows: Vec<(usize, &str, &str, &str)> = vec![
-                    (0, "name", &form.fields[0], ""),
+                    (0, "name", form.inputs[0].value(), ""),
                     (1, "protocol", protocol, ""),
                     (2, "mode", mode, ""),
                 ];
                 if form.mode_idx == 1 {
-                    rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
-                    rows.push((4, "remote port", &form.fields[4], remote_default_port));
-                    rows.push((5, "interface", &form.fields[5], "lo0"));
+                    rows.push((3, "remote host", form.inputs[3].value(), "127.0.0.1"));
+                    rows.push((4, "remote port", form.inputs[4].value(), remote_default_port));
+                    rows.push((5, "interface", form.inputs[5].value(), DEFAULT_IFACE));
                 } else if form.editing_idx.is_some() {
-                    rows.push((3, "listen host", &form.fields[1], "127.0.0.1"));
-                    rows.push((4, "listen port", &form.fields[2], ""));
-                    rows.push((5, "remote host", &form.fields[3], "127.0.0.1"));
-                    rows.push((6, "remote port", &form.fields[4], remote_default_port));
+                    rows.push((3, "listen host", form.inputs[1].value(), "127.0.0.1"));
+                    rows.push((4, "listen port", form.inputs[2].value(), ""));
+                    rows.push((5, "remote host", form.inputs[3].value(), "127.0.0.1"));
+                    rows.push((6, "remote port", form.inputs[4].value(), remote_default_port));
                 } else {
-                    rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
-                    rows.push((4, "remote port", &form.fields[4], remote_default_port));
+                    rows.push((3, "remote host", form.inputs[3].value(), "127.0.0.1"));
+                    rows.push((4, "remote port", form.inputs[4].value(), remote_default_port));
                 }
+                let max_val_w = (fw as usize).saturating_sub(2 + 18 + 1);
                 let mut form_lines: Vec<Line> = Vec::new();
                 for &(i, label, value, placeholder) in &rows {
-                    let cursor = if i == form.active_field { "▌" } else { "" };
-                    let label_style = if i == form.active_field { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) };
-                    let hint = if (i == 1 || i == 2) && i == form.active_field { " ◀ ▶" } else { "" };
-                    let display = if value.is_empty() && !placeholder.is_empty() && i != form.active_field {
+                    let is_active = i == form.active_field;
+                    let label_style = if is_active { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) };
+                    let hint = if (i == 1 || i == 2) && is_active { " ◀ ▶" } else { "" };
+                    let display = if value.is_empty() && !placeholder.is_empty() && !is_active {
                         vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(placeholder.to_string(), Style::default().fg(Color::Rgb(80, 80, 80)))]
-                    } else if value.is_empty() && !placeholder.is_empty() {
-                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(cursor.to_string(), Style::default().fg(Color::White)), Span::styled(format!(" ({})", placeholder), Style::default().fg(Color::Rgb(80, 80, 80)))]
+                    } else if value.is_empty() && !placeholder.is_empty() && is_active {
+                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled("▌", Style::default().fg(Color::White)), Span::styled(format!(" ({})", placeholder), Style::default().fg(Color::Rgb(80, 80, 80)))]
+                    } else if is_active {
+                        let cur = form.field_idx().map(|fi| form.inputs[fi].cursor().min(value.len())).unwrap_or(value.len());
+                        let (vs, ve) = if value.len() <= max_val_w { (0, value.len()) } else if cur <= max_val_w / 2 { (0, max_val_w) } else if cur >= value.len() - max_val_w / 2 { (value.len() - max_val_w, value.len()) } else { (cur - max_val_w / 2, cur + max_val_w / 2) };
+                        let prefix = if vs > 0 { "…" } else { "" };
+                        let suffix = if ve < value.len() { "…" } else { "" };
+                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(format!("{}{}", prefix, &value[vs..cur]), Style::default().fg(Color::White)), Span::styled("▌", Style::default().fg(Color::Cyan)), Span::styled(format!("{}{}", &value[cur..ve], suffix), Style::default().fg(Color::White)), Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray))]
                     } else {
-                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(format!("{}{}", value, cursor), Style::default().fg(Color::White)), Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray))]
+                        let vis = if value.len() > max_val_w { format!("{}…", &value[..max_val_w - 1]) } else { value.to_string() };
+                        vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(vis, Style::default().fg(Color::White)), Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray))]
                     };
                     form_lines.push(Line::from(display));
                 }
-                form_lines.push(Line::from(""));
-                if let Some(ref err) = form.error {
-                    form_lines.push(Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))));
-                }
-                form_lines.push(Line::from(vec![
+                let error_line = if let Some(ref err) = form.error {
+                    Some(Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))))
+                } else { None };
+                let hint_line = Line::from(vec![
                     Span::raw("   "),
                     Span::styled("Esc", Style::default().fg(Color::DarkGray)), Span::raw(" cancel  "),
                     Span::styled("Enter", Style::default().fg(Color::Green)), Span::raw(" save"),
-                ]));
+                ]);
+                let inner_h = (fh - 2) as usize;
+                let bottom_n = if error_line.is_some() { 2 } else { 1 };
+                let pad = inner_h.saturating_sub(form_lines.len() + bottom_n);
+                for _ in 0..pad { form_lines.push(Line::from("")); }
+                if let Some(el) = error_line { form_lines.push(el); }
+                form_lines.push(hint_line);
                 let popup = Paragraph::new(form_lines)
                     .block(Block::default().borders(Borders::ALL)
                         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -2378,6 +2317,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             ListItem::new(Line::from(vec![
                 Span::raw(format!("{} ", prefix)),
                 Span::styled(dot, Style::default().fg(dot_color)),
+                Span::styled(if c.listen.is_empty() { " ⊙" } else { " ⇄" }, Style::default().fg(Color::DarkGray)),
                 Span::styled(format!(" {}", c.name), style),
                 Span::styled(format!(" {}", count), count_style),
             ])).style(style)
@@ -2411,6 +2351,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             ListItem::new(Line::from(vec![
                 Span::raw(format!("{} ", prefix)),
                 Span::styled(dot, Style::default().fg(dot_color)),
+                Span::styled(if c.listen.is_empty() { " ⊙" } else { " ⇄" }, Style::default().fg(Color::DarkGray)),
                 Span::styled(format!(" {}", c.name), style),
                 Span::styled(format!(" {}", count), count_style),
             ])).style(style)
@@ -2471,7 +2412,29 @@ fn ui(f: &mut Frame, app: &mut App) {
                             "index" => (format!("{}", orig_idx + 1), theme.line_number),
                             "time" => (time.clone(), theme.timestamp),
                             "component" => (ev.component.to_string(), if ev.system { Style::default().fg(Color::Red) } else { theme.component_style(ev.protocol) }),
-                            "command" => (ev.command.clone(), if ev.system { Style::default().fg(Color::Red) } else { theme.command }),
+                            "command" => {
+                                let cmd_style = if ev.system { Style::default().fg(Color::Red) } else { theme.command };
+                                if ev.protocol == ocular_protocol::Protocol::Http && !ev.response.is_empty() && !ev.system {
+                                    let status_code = ev.response.split_whitespace().next().unwrap_or("");
+                                    let color = match status_code.chars().next() {
+                                        Some('2') => Color::Green,
+                                        Some('3') => Color::Cyan,
+                                        Some('4') => Color::Yellow,
+                                        Some('5') => Color::Red,
+                                        _ => Color::DarkGray,
+                                    };
+                                    let formatted = match width {
+                                        Some(w) if *w > 0 => format!("{:>width$}", ev.command, width = *w as usize),
+                                        Some(w) if *w < 0 => format!("{:<width$}", ev.command, width = (-*w) as usize),
+                                        _ => ev.command.clone(),
+                                    };
+                                    return vec![
+                                        Span::styled(format!("[{}] ", status_code), Style::default().fg(color)),
+                                        Span::styled(formatted, cmd_style),
+                                    ];
+                                }
+                                (ev.command.clone(), cmd_style)
+                            },
                             "latency" => {
                                 let style = if app.latency_threshold_ms.is_some_and(|t| ev.latency.as_secs_f64() * 1000.0 > t) {
                                     Style::default().fg(Color::Red)
@@ -2822,8 +2785,8 @@ fn ui(f: &mut Frame, app: &mut App) {
     // Proxy form popup
     if let Some(ref form) = app.proxy_form {
         let area = f.area();
-        let w: u16 = 54;
-        let h: u16 = if form.mode_idx == 1 { 15 } else if form.editing_idx.is_some() { 16 } else { 14 };
+        let w: u16 = 42;
+        let h: u16 = 13;
         let x = (area.width.saturating_sub(w)) / 2;
         let y = (area.height.saturating_sub(h)) / 2;
         let popup_area = Rect::new(x, y, w, h);
@@ -2836,64 +2799,108 @@ fn ui(f: &mut Frame, app: &mut App) {
 
         // field_idx, label, value, placeholder
         let mut rows: Vec<(usize, &str, &str, &str)> = vec![
-            (0, "name", &form.fields[0], ""),
+            (0, "name", form.inputs[0].value(), ""),
             (1, "protocol", protocol, ""),
             (2, "mode", mode, ""),
         ];
         if form.mode_idx == 1 {
-            rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
-            rows.push((4, "remote port", &form.fields[4], remote_default_port));
-            rows.push((5, "interface", &form.fields[5], "lo0"));
+            rows.push((3, "remote host", form.inputs[3].value(), "127.0.0.1"));
+            rows.push((4, "remote port", form.inputs[4].value(), remote_default_port));
+            rows.push((5, "interface", form.inputs[5].value(), DEFAULT_IFACE));
         } else if form.editing_idx.is_some() {
-            rows.push((3, "listen host", &form.fields[1], "127.0.0.1"));
-            rows.push((4, "listen port", &form.fields[2], ""));
-            rows.push((5, "remote host", &form.fields[3], "127.0.0.1"));
-            rows.push((6, "remote port", &form.fields[4], remote_default_port));
+            rows.push((3, "listen host", form.inputs[1].value(), "127.0.0.1"));
+            rows.push((4, "listen port", form.inputs[2].value(), ""));
+            rows.push((5, "remote host", form.inputs[3].value(), "127.0.0.1"));
+            rows.push((6, "remote port", form.inputs[4].value(), remote_default_port));
         } else {
-            rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
-            rows.push((4, "remote port", &form.fields[4], remote_default_port));
+            rows.push((3, "remote host", form.inputs[3].value(), "127.0.0.1"));
+            rows.push((4, "remote port", form.inputs[4].value(), remote_default_port));
         }
 
         let mut lines: Vec<Line> = Vec::new();
+        let max_value_width = (w as usize).saturating_sub(2 + 18 + 1); // borders + label prefix + padding
         for &(i, label, value, placeholder) in &rows {
-            let cursor = if i == form.active_field { "▌" } else { "" };
-            let label_style = if i == form.active_field {
+            let is_active = i == form.active_field;
+            let label_style = if is_active {
                 Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            let hint = if (i == 1 || i == 2) && i == form.active_field { " ◀ ▶" } else { "" };
-            let display = if value.is_empty() && !placeholder.is_empty() && i != form.active_field {
+            let hint = if (i == 1 || i == 2) && is_active { " ◀ ▶" } else { "" };
+            let display = if value.is_empty() && !placeholder.is_empty() && !is_active {
                 vec![
                     Span::styled(format!("   {:>12}: ", label), label_style),
                     Span::styled(placeholder.to_string(), Style::default().fg(Color::Rgb(80, 80, 80))),
                 ]
-            } else if value.is_empty() && !placeholder.is_empty() {
+            } else if value.is_empty() && !placeholder.is_empty() && is_active {
                 vec![
                     Span::styled(format!("   {:>12}: ", label), label_style),
-                    Span::styled(cursor.to_string(), Style::default().fg(Color::White)),
+                    Span::styled("▌", Style::default().fg(Color::White)),
                     Span::styled(format!(" ({})", placeholder), Style::default().fg(Color::Rgb(80, 80, 80))),
                 ]
-            } else {
+            } else if is_active {
+                // Show cursor at position within value
+                let cur = form.field_idx().map(|fi| form.inputs[fi].cursor().min(value.len())).unwrap_or(value.len());
+                // Scroll: keep cursor visible within max_value_width
+                let (vis_start, vis_end) = if value.len() <= max_value_width {
+                    (0, value.len())
+                } else if cur <= max_value_width / 2 {
+                    (0, max_value_width)
+                } else if cur >= value.len() - max_value_width / 2 {
+                    (value.len() - max_value_width, value.len())
+                } else {
+                    (cur - max_value_width / 2, cur + max_value_width / 2)
+                };
+                let before = &value[vis_start..cur];
+                let after = &value[cur..vis_end];
+                let prefix = if vis_start > 0 { "…" } else { "" };
+                let suffix = if vis_end < value.len() { "…" } else { "" };
                 vec![
                     Span::styled(format!("   {:>12}: ", label), label_style),
-                    Span::styled(format!("{}{}", value, cursor), Style::default().fg(Color::White)),
+                    Span::styled(format!("{}{}", prefix, before), Style::default().fg(Color::White)),
+                    Span::styled("▌", Style::default().fg(Color::Cyan)),
+                    Span::styled(format!("{}{}", after, suffix), Style::default().fg(Color::White)),
+                    Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray)),
+                ]
+            } else {
+                // Non-active: truncate from right
+                let visible_value = if value.len() > max_value_width {
+                    format!("{}…", &value[..max_value_width - 1])
+                } else {
+                    value.to_string()
+                };
+                vec![
+                    Span::styled(format!("   {:>12}: ", label), label_style),
+                    Span::styled(visible_value, Style::default().fg(Color::White)),
                     Span::styled(hint.to_string(), Style::default().fg(Color::DarkGray)),
                 ]
             };
             lines.push(Line::from(display));
         }
-        lines.push(Line::from(""));
-        if let Some(ref err) = form.error {
-            lines.push(Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))));
-        }
-        lines.push(Line::from(vec![
+        // Error line (if any)
+        let error_line = if let Some(ref err) = form.error {
+            Some(Line::from(Span::styled(format!("   ⚠ {}", err), Style::default().fg(Color::Red))))
+        } else {
+            None
+        };
+        let hint_line = Line::from(vec![
             Span::raw("   "),
             Span::styled("Esc", Style::default().fg(Color::DarkGray)),
             Span::raw(" cancel  "),
             Span::styled("Enter", Style::default().fg(Color::Green)),
             Span::raw(" submit"),
-        ]));
+        ]);
+        // Pad to pin error+hint at bottom (inner height = h - 2 for borders)
+        let inner_h = (h - 2) as usize;
+        let bottom_lines = if error_line.is_some() { 2 } else { 1 };
+        let pad = inner_h.saturating_sub(lines.len() + bottom_lines);
+        for _ in 0..pad {
+            lines.push(Line::from(""));
+        }
+        if let Some(el) = error_line {
+            lines.push(el);
+        }
+        lines.push(hint_line);
 
         let popup = Paragraph::new(lines)
             .block(Block::default().borders(Borders::ALL)
