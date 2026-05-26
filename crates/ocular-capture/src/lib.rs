@@ -103,6 +103,7 @@ pub async fn run_capture(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_packet(
     raw: &[u8],
     remote_addr: std::net::SocketAddr,
@@ -175,10 +176,8 @@ fn process_packet(
         Direction::Request => {
             stream.push_request(payload);
             // Try to parse complete request
-            if handler.needs_request_buffering() {
-                if !handler.request_complete(&stream.request_buf) {
-                    return;
-                }
+            if handler.needs_request_buffering() && !handler.request_complete(&stream.request_buf) {
+                return;
             }
             let buf = &stream.request_buf;
             if let Some(command) = parse_request(protocol, buf) {
@@ -196,10 +195,8 @@ fn process_packet(
         }
         Direction::Response => {
             stream.push_response(payload);
-            if handler.needs_response_buffering() {
-                if !handler.response_complete(&stream.response_buf) {
-                    return;
-                }
+            if handler.needs_response_buffering() && !handler.response_complete(&stream.response_buf) {
+                return;
             }
             let buf = &stream.response_buf;
             // If response can't be parsed, it may be incomplete — keep buffering

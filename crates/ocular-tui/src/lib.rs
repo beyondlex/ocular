@@ -3211,6 +3211,7 @@ fn highlight_json_line(line: &str) -> Line<'static> {
 }
 
 
+#[allow(clippy::too_many_arguments)]
 fn save_proxy_config(config_path: &std::path::Path, _components: &[ComponentInfo], protocol: &str, editing_idx: Option<usize>, name: &str, listen: &str, remote: &str, mode: &str, interface: &str) {
     let Ok(content) = std::fs::read_to_string(config_path) else { return };
     let Ok(mut doc) = content.parse::<toml_edit::DocumentMut>() else { return };
