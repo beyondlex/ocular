@@ -1,0 +1,15 @@
+[package]
+name = "ocular-capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Passive traffic capture engine (libpcap) for ocular"
+
+[dependencies]
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+pcap = "2"
+etherparse = "0.16"
+ocular-protocol = { path = "../ocular-protocol", version = "0.8.0" }

@@ -131,6 +131,8 @@ struct NewProxyEntry {
     protocol: String,
     listen: String,
     remote: String,
+    mode: String,
+    interface: String,
 }
 
 impl DashboardState {
@@ -196,51 +198,82 @@ fn default_port(protocol: &str) -> &'static str {
 /// Fields: 0=name, 1=protocol(selector), 2=remote_host, 3=remote_port
 #[derive(Default)]
 struct ProxyForm {
-    /// [name, listen_host, listen_port, remote_host, remote_port]
-    fields: [String; 5],
+    /// [name, listen_host, listen_port, remote_host, remote_port, interface]
+    fields: [String; 6],
     active_field: usize,
     editing_idx: Option<usize>,
     protocol_idx: usize,
+    mode_idx: usize, // 0=proxy, 1=capture
     error: Option<String>,
     /// Existing listen addr for edit mode (reused on save)
     existing_listen: Option<String>,
 }
 
+const MODES: &[&str] = &["proxy", "capture"];
+
 impl ProxyForm {
     /// Map active_field (row index) to fields[] index.
-    /// Create: rows [name, protocol, remote_host, remote_port] → fields [0, -, 3, 4]
-    /// Edit:   rows [name, protocol, listen_host, listen_port, remote_host, remote_port] → fields [0, -, 1, 2, 3, 4]
+    /// Proxy create: rows [name, protocol, mode, remote_host, remote_port] → fields [0, -, -, 3, 4]
+    /// Capture create: rows [name, protocol, mode, remote_host, remote_port, interface] → fields [0, -, -, 3, 4, 5]
+    /// Proxy edit: rows [name, protocol, mode, listen_host, listen_port, remote_host, remote_port] → fields [0, -, -, 1, 2, 3, 4]
+    /// Capture edit: rows [name, protocol, mode, remote_host, remote_port, interface] → fields [0, -, -, 3, 4, 5]
     fn field_idx(&self) -> Option<usize> {
-        if self.editing_idx.is_some() {
+        let is_capture = self.mode_idx == 1;
+        if self.editing_idx.is_some() && !is_capture {
+            // Proxy edit: name, protocol, mode, listen_host, listen_port, remote_host, remote_port
             match self.active_field {
                 0 => Some(0),
-                1 => None, // protocol (special)
-                2 => Some(1),
-                3 => Some(2),
-                4 => Some(3),
-                5 => Some(4),
+                1 | 2 => None, // protocol, mode (selectors)
+                3 => Some(1),
+                4 => Some(2),
+                5 => Some(3),
+                6 => Some(4),
+                _ => None,
+            }
+        } else if is_capture {
+            // Capture (create or edit): name, protocol, mode, remote_host, remote_port, interface
+            match self.active_field {
+                0 => Some(0),
+                1 | 2 => None, // protocol, mode (selectors)
+                3 => Some(3),
+                4 => Some(4),
+                5 => Some(5),
                 _ => None,
             }
         } else {
+            // Proxy create: name, protocol, mode, remote_host, remote_port
             match self.active_field {
                 0 => Some(0),
-                1 => None, // protocol
-                2 => Some(3),
-                3 => Some(4),
+                1 | 2 => None, // protocol, mode
+                3 => Some(3),
+                4 => Some(4),
                 _ => None,
             }
         }
     }
 
+    fn row_count(&self) -> usize {
+        let is_capture = self.mode_idx == 1;
+        if is_capture {
+            6 // name, protocol, mode, remote_host, remote_port, interface
+        } else if self.editing_idx.is_some() {
+            7 // name, protocol, mode, listen_host, listen_port, remote_host, remote_port
+        } else {
+            5 // name, protocol, mode, remote_host, remote_port
+        }
+    }
+
     fn from_entry(entry: &NewProxyEntry) -> Self {
         let protocol_idx = PROTOCOLS.iter().position(|&p| p == entry.protocol).unwrap_or(0);
+        let mode_idx = if entry.mode == "capture" { 1 } else { 0 };
         let (rh, rp) = split_addr(&entry.remote);
         let (lh, lp) = split_addr(&entry.listen);
         Self {
-            fields: [entry.name.clone(), lh, lp, rh, rp],
+            fields: [entry.name.clone(), lh, lp, rh, rp, entry.interface.clone()],
             active_field: 0,
             editing_idx: None,
             protocol_idx,
+            mode_idx,
             error: None,
             existing_listen: Some(entry.listen.clone()),
         }
@@ -556,6 +589,10 @@ struct ReloadableProxy {
     #[serde(default)]
     remote: String,
     #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    interface: Option<String>,
+    #[serde(default)]
     exclude: Option<ReloadableExclude>,
     #[serde(default)]
     include: Option<ReloadableExclude>,
@@ -810,6 +847,8 @@ pub async fn run(
                                                     protocol: p.protocol.clone(),
                                                     listen: p.listen.clone(),
                                                     remote: p.remote.clone(),
+                                                    mode: p.mode.clone().unwrap_or_default(),
+                                                    interface: p.interface.clone().unwrap_or_default(),
                                                 }).collect();
                                                 app.dashboard.detail_selected = 0;
                                                 app.proxy_form = None;
@@ -852,7 +891,7 @@ pub async fn run(
                                             let file = gdir.join(format!("{}.toml", name));
                                             let mut content = String::new();
                                             for p in &app.dashboard.new_group_proxies {
-                                                content.push_str(&format!("[[proxy]]\nname = \"{}\"\nprotocol = \"{}\"\nlisten = \"{}\"\nremote = \"{}\"\n\n", p.name, p.protocol, p.listen, p.remote));
+                                                content.push_str(&format_proxy_toml(&p.name, &p.protocol, &p.listen, &p.remote, &p.mode, &p.interface));
                                             }
                                             let _ = std::fs::write(&file, content);
                                             app.dashboard = DashboardState::load(gdir, &app.main_config_path);
@@ -869,8 +908,8 @@ pub async fn run(
                                 if let Some(ref mut form) = app.proxy_form {
                                     match key.code {
                                         KeyCode::Esc => { app.proxy_form = None; }
-                                        KeyCode::Tab => { let fc = if form.editing_idx.is_some() { 6 } else { 4 }; form.active_field = (form.active_field + 1) % fc; form.error = None; }
-                                        KeyCode::BackTab => { let fc = if form.editing_idx.is_some() { 6 } else { 4 }; form.active_field = (form.active_field + fc - 1) % fc; form.error = None; }
+                                        KeyCode::Tab => { let fc = form.row_count(); form.active_field = (form.active_field + 1) % fc; form.error = None; }
+                                        KeyCode::BackTab => { let fc = form.row_count(); form.active_field = (form.active_field + fc - 1) % fc; form.error = None; }
                                         KeyCode::Enter => {
                                             let protocol = PROTOCOLS[form.protocol_idx];
                                             let name = form.fields[0].trim().to_string();
@@ -881,23 +920,29 @@ pub async fn run(
                                             } else if app.dashboard.new_group_proxies.iter().any(|p| p.name == name) {
                                                 form.error = Some(format!("name \"{}\" already exists", name));
                                             } else {
-                                                let listen = auto_assign_listen_port(protocol);
+                                                let mode_str = MODES[form.mode_idx].to_string();
+                                                let iface = form.fields[5].clone();
+                                                let listen = if form.mode_idx == 1 { String::new() } else { auto_assign_listen_port(protocol) };
                                                 let remote = format!("{}:{}", remote_host, remote_port);
                                                 app.dashboard.new_group_proxies.push(NewProxyEntry {
-                                                    name, protocol: protocol.to_string(), listen, remote,
+                                                    name, protocol: protocol.to_string(), listen, remote, mode: mode_str, interface: iface,
                                                 });
                                                 app.proxy_form = None;
                                             }
                                         }
                                         KeyCode::Left if form.active_field == 1 => { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
                                         KeyCode::Right if form.active_field == 1 => { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
+                                        KeyCode::Left if form.active_field == 2 => { form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
+                                        KeyCode::Right if form.active_field == 2 => { form.mode_idx = (form.mode_idx + 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
                                         KeyCode::Backspace => {
                                             if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
+                                            else if form.active_field == 2 { form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
                                             else if let Some(fi) = form.field_idx() { form.fields[fi].pop(); }
                                             form.error = None;
                                         }
                                         KeyCode::Char(c) => {
                                             if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
+                                            else if form.active_field == 2 { form.mode_idx = (form.mode_idx + 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
                                             else if let Some(fi) = form.field_idx() { form.fields[fi].push(c); }
                                             form.error = None;
                                         }
@@ -949,7 +994,7 @@ pub async fn run(
                                             };
                                             let mut content = String::new();
                                             for p in &app.dashboard.detail_proxies {
-                                                content.push_str(&format!("[[proxy]]\nname = \"{}\"\nprotocol = \"{}\"\nlisten = \"{}\"\nremote = \"{}\"\n\n", p.name, p.protocol, p.listen, p.remote));
+                                                content.push_str(&format_proxy_toml(&p.name, &p.protocol, &p.listen, &p.remote, &p.mode, &p.interface));
                                             }
                                             let _ = std::fs::write(&group_file, content);
                                             app.dashboard.detail_delete_confirm = false;
@@ -964,8 +1009,8 @@ pub async fn run(
                             if let Some(ref mut form) = app.proxy_form {
                                 match key.code {
                                     KeyCode::Esc => { app.proxy_form = None; }
-                                    KeyCode::Tab => { let fc = if form.editing_idx.is_some() { 6 } else { 4 }; form.active_field = (form.active_field + 1) % fc; form.error = None; }
-                                    KeyCode::BackTab => { let fc = if form.editing_idx.is_some() { 6 } else { 4 }; form.active_field = (form.active_field + fc - 1) % fc; form.error = None; }
+                                    KeyCode::Tab => { let fc = form.row_count(); form.active_field = (form.active_field + 1) % fc; form.error = None; }
+                                    KeyCode::BackTab => { let fc = form.row_count(); form.active_field = (form.active_field + fc - 1) % fc; form.error = None; }
                                     KeyCode::Enter => {
                                         let protocol = PROTOCOLS[form.protocol_idx];
                                         let name = form.fields[0].trim().to_string();
@@ -977,7 +1022,10 @@ pub async fn run(
                                             && form.editing_idx.is_none() {
                                             form.error = Some(format!("name \"{}\" already exists", name));
                                         } else {
-                                            let listen = if form.editing_idx.is_some() && (!form.fields[1].is_empty() || !form.fields[2].is_empty()) {
+                                            let is_capture = form.mode_idx == 1;
+                                            let listen = if is_capture {
+                                                String::new()
+                                            } else if form.editing_idx.is_some() && (!form.fields[1].is_empty() || !form.fields[2].is_empty()) {
                                                 let lh = if form.fields[1].is_empty() { "127.0.0.1" } else { form.fields[1].trim() };
                                                 let lp = if form.fields[2].is_empty() { "0" } else { form.fields[2].trim() };
                                                 format!("{}:{}", lh, lp)
@@ -985,15 +1033,17 @@ pub async fn run(
                                                 form.existing_listen.clone().unwrap_or_else(|| auto_assign_listen_port(protocol))
                                             };
                                             let remote = format!("{}:{}", remote_host, remote_port);
+                                            let mode_str = MODES[form.mode_idx].to_string();
+                                            let iface = form.fields[5].clone();
                                             if let Some(idx) = form.editing_idx {
                                                 if idx < app.dashboard.detail_proxies.len() {
                                                     app.dashboard.detail_proxies[idx] = NewProxyEntry {
-                                                        name, protocol: protocol.to_string(), listen, remote,
+                                                        name, protocol: protocol.to_string(), listen, remote, mode: mode_str, interface: iface,
                                                     };
                                                 }
                                             } else {
                                                 app.dashboard.detail_proxies.push(NewProxyEntry {
-                                                    name, protocol: protocol.to_string(), listen, remote,
+                                                    name, protocol: protocol.to_string(), listen, remote, mode: mode_str, interface: iface,
                                                 });
                                             }
                                             // Save to file
@@ -1007,7 +1057,7 @@ pub async fn run(
                                             };
                                             let mut content = String::new();
                                             for p in &app.dashboard.detail_proxies {
-                                                content.push_str(&format!("[[proxy]]\nname = \"{}\"\nprotocol = \"{}\"\nlisten = \"{}\"\nremote = \"{}\"\n\n", p.name, p.protocol, p.listen, p.remote));
+                                                content.push_str(&format_proxy_toml(&p.name, &p.protocol, &p.listen, &p.remote, &p.mode, &p.interface));
                                             }
                                             let _ = std::fs::write(&group_file, content);
                                             app.proxy_form = None;
@@ -1015,13 +1065,17 @@ pub async fn run(
                                     }
                                     KeyCode::Left if form.active_field == 1 => { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
                                     KeyCode::Right if form.active_field == 1 => { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
+                                    KeyCode::Left if form.active_field == 2 => { form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
+                                    KeyCode::Right if form.active_field == 2 => { form.mode_idx = (form.mode_idx + 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
                                     KeyCode::Backspace => {
                                         if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len(); }
+                                        else if form.active_field == 2 { form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
                                         else if let Some(fi) = form.field_idx() { form.fields[fi].pop(); }
                                         form.error = None;
                                     }
                                     KeyCode::Char(c) => {
                                         if form.active_field == 1 { form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len(); }
+                                        else if form.active_field == 2 { form.mode_idx = (form.mode_idx + 1) % MODES.len(); form.active_field = form.active_field.min(form.row_count() - 1); }
                                         else if let Some(fi) = form.field_idx() { form.fields[fi].push(c); }
                                         form.error = None;
                                     }
@@ -1202,9 +1256,9 @@ pub async fn run(
                     continue;
                 }
 
-                // Proxy form handling (6 fields: name, protocol, listen_host, listen_port, remote_host, remote_port)
+                // Proxy form handling
                 if let Some(ref mut form) = app.proxy_form {
-                    let field_count: usize = if form.editing_idx.is_some() { 6 } else { 4 };
+                    let field_count: usize = form.row_count();
                     match key.code {
                         KeyCode::Esc => { app.proxy_form = None; }
                         KeyCode::Tab => { form.active_field = (form.active_field + 1) % field_count; form.error = None; }
@@ -1228,13 +1282,21 @@ pub async fn run(
                                 if name_taken {
                                     form.error = Some(format!("name \"{}\" already exists", name));
                                 } else {
-                                    let listen_addr = if form.editing_idx.is_some() && (!form.fields[1].is_empty() || !form.fields[2].is_empty()) {
+                                    let is_capture = form.mode_idx == 1;
+                                    if is_capture && form.fields[5].trim().is_empty() {
+                                        form.error = Some("interface is required for capture mode".into());
+                                    } else {
+                                    let listen_addr = if is_capture {
+                                        String::new()
+                                    } else if form.editing_idx.is_some() && (!form.fields[1].is_empty() || !form.fields[2].is_empty()) {
                                         let lh = if form.fields[1].is_empty() { "127.0.0.1" } else { form.fields[1].trim() };
                                         let lp = if form.fields[2].is_empty() { "0" } else { form.fields[2].trim() };
                                         format!("{}:{}", lh, lp)
                                     } else {
                                         form.existing_listen.clone().unwrap_or_else(|| auto_assign_listen_port(protocol))
                                     };
+                                    let mode_str = MODES[form.mode_idx];
+                                    let iface = form.fields[5].trim().to_string();
                                     {
                                         let remote_addr = format!("{}:{}", remote_host, remote_port);
                                         let editing_idx = form.editing_idx;
@@ -1253,7 +1315,8 @@ pub async fn run(
                                         } else {
                                             app.components.push(ci);
                                         }
-                                        save_proxy_config(&app.config_path, &app.components, protocol, editing_idx, &name, &listen_addr, &remote_addr);
+                                        save_proxy_config(&app.config_path, &app.components, protocol, editing_idx, &name, &listen_addr, &remote_addr, mode_str, &iface);
+                                    }
                                     }
                                 }
                             }
@@ -1264,9 +1327,20 @@ pub async fn run(
                         KeyCode::Right if form.active_field == 1 => {
                             form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len();
                         }
+                        KeyCode::Left if form.active_field == 2 => {
+                            form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len();
+                            form.active_field = form.active_field.min(form.row_count() - 1);
+                        }
+                        KeyCode::Right if form.active_field == 2 => {
+                            form.mode_idx = (form.mode_idx + 1) % MODES.len();
+                            form.active_field = form.active_field.min(form.row_count() - 1);
+                        }
                         KeyCode::Backspace => {
                             if form.active_field == 1 {
                                 form.protocol_idx = (form.protocol_idx + PROTOCOLS.len() - 1) % PROTOCOLS.len();
+                            } else if form.active_field == 2 {
+                                form.mode_idx = (form.mode_idx + MODES.len() - 1) % MODES.len();
+                                form.active_field = form.active_field.min(form.row_count() - 1);
                             } else if let Some(fi) = form.field_idx() {
                                 form.fields[fi].pop();
                             }
@@ -1275,6 +1349,9 @@ pub async fn run(
                         KeyCode::Char(c) => {
                             if form.active_field == 1 {
                                 form.protocol_idx = (form.protocol_idx + 1) % PROTOCOLS.len();
+                            } else if form.active_field == 2 {
+                                form.mode_idx = (form.mode_idx + 1) % MODES.len();
+                                form.active_field = form.active_field.min(form.row_count() - 1);
                             } else if let Some(fi) = form.field_idx() {
                                 form.fields[fi].push(c);
                             }
@@ -1657,10 +1734,11 @@ pub async fn run(
                         if let Some(idx) = app.component_idx {
                             if let Some(ci) = app.components.get(idx) {
                                 let mut form = ProxyForm {
-                                    fields: [ci.name.clone(), String::new(), String::new(), String::new(), String::new()],
+                                    fields: [ci.name.clone(), String::new(), String::new(), String::new(), String::new(), String::new()],
                                     active_field: 0,
                                     editing_idx: Some(idx),
                                     protocol_idx: 0,
+                                    mode_idx: 0,
                                     error: None,
                                     existing_listen: Some(ci.listen.clone()),
                                 };
@@ -1668,12 +1746,14 @@ pub async fn run(
                                     if let Ok(cfg) = toml::from_str::<ReloadableConfig>(&content) {
                                         if let Some(p) = cfg.proxy.iter().find(|p| p.name == ci.name) {
                                             form.protocol_idx = PROTOCOLS.iter().position(|&x| x == p.protocol).unwrap_or(0);
+                                            form.mode_idx = if p.mode.as_deref() == Some("capture") { 1 } else { 0 };
                                             let (rh, rp) = split_addr(&p.remote);
                                             form.fields[3] = rh;
                                             form.fields[4] = rp;
                                             let (lh, lp) = split_addr(&ci.listen);
                                             form.fields[1] = lh;
                                             form.fields[2] = lp;
+                                            form.fields[5] = p.interface.clone().unwrap_or_default();
                                         }
                                     }
                                 }
@@ -2018,25 +2098,31 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                 f.render_widget(Clear, popup_area);
 
                 let protocol = PROTOCOLS[form.protocol_idx];
+                let mode = MODES[form.mode_idx];
                 let remote_default_port = default_port(protocol);
                 let mut rows: Vec<(usize, &str, &str, &str)> = vec![
                     (0, "name", &form.fields[0], ""),
                     (1, "protocol", protocol, ""),
+                    (2, "mode", mode, ""),
                 ];
-                if form.editing_idx.is_some() {
-                    rows.push((2, "listen host", &form.fields[1], "127.0.0.1"));
-                    rows.push((3, "listen port", &form.fields[2], ""));
-                    rows.push((4, "remote host", &form.fields[3], "127.0.0.1"));
-                    rows.push((5, "remote port", &form.fields[4], remote_default_port));
+                if form.mode_idx == 1 {
+                    rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
+                    rows.push((4, "remote port", &form.fields[4], remote_default_port));
+                    rows.push((5, "interface", &form.fields[5], "lo0"));
+                } else if form.editing_idx.is_some() {
+                    rows.push((3, "listen host", &form.fields[1], "127.0.0.1"));
+                    rows.push((4, "listen port", &form.fields[2], ""));
+                    rows.push((5, "remote host", &form.fields[3], "127.0.0.1"));
+                    rows.push((6, "remote port", &form.fields[4], remote_default_port));
                 } else {
-                    rows.push((2, "remote host", &form.fields[3], "127.0.0.1"));
-                    rows.push((3, "remote port", &form.fields[4], remote_default_port));
+                    rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
+                    rows.push((4, "remote port", &form.fields[4], remote_default_port));
                 }
                 let mut form_lines: Vec<Line> = Vec::new();
                 for &(i, label, value, placeholder) in &rows {
                     let cursor = if i == form.active_field { "▌" } else { "" };
                     let label_style = if i == form.active_field { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) };
-                    let hint = if i == 1 && i == form.active_field { " ◀ ▶" } else { "" };
+                    let hint = if (i == 1 || i == 2) && i == form.active_field { " ◀ ▶" } else { "" };
                     let display = if value.is_empty() && !placeholder.is_empty() && i != form.active_field {
                         vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(placeholder.to_string(), Style::default().fg(Color::Rgb(80, 80, 80)))]
                     } else if value.is_empty() && !placeholder.is_empty() {
@@ -2122,25 +2208,31 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                 f.render_widget(Clear, popup_area);
 
                 let protocol = PROTOCOLS[form.protocol_idx];
+                let mode = MODES[form.mode_idx];
                 let remote_default_port = default_port(protocol);
                 let mut rows: Vec<(usize, &str, &str, &str)> = vec![
                     (0, "name", &form.fields[0], ""),
                     (1, "protocol", protocol, ""),
+                    (2, "mode", mode, ""),
                 ];
-                if form.editing_idx.is_some() {
-                    rows.push((2, "listen host", &form.fields[1], "127.0.0.1"));
-                    rows.push((3, "listen port", &form.fields[2], ""));
-                    rows.push((4, "remote host", &form.fields[3], "127.0.0.1"));
-                    rows.push((5, "remote port", &form.fields[4], remote_default_port));
+                if form.mode_idx == 1 {
+                    rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
+                    rows.push((4, "remote port", &form.fields[4], remote_default_port));
+                    rows.push((5, "interface", &form.fields[5], "lo0"));
+                } else if form.editing_idx.is_some() {
+                    rows.push((3, "listen host", &form.fields[1], "127.0.0.1"));
+                    rows.push((4, "listen port", &form.fields[2], ""));
+                    rows.push((5, "remote host", &form.fields[3], "127.0.0.1"));
+                    rows.push((6, "remote port", &form.fields[4], remote_default_port));
                 } else {
-                    rows.push((2, "remote host", &form.fields[3], "127.0.0.1"));
-                    rows.push((3, "remote port", &form.fields[4], remote_default_port));
+                    rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
+                    rows.push((4, "remote port", &form.fields[4], remote_default_port));
                 }
                 let mut form_lines: Vec<Line> = Vec::new();
                 for &(i, label, value, placeholder) in &rows {
                     let cursor = if i == form.active_field { "▌" } else { "" };
                     let label_style = if i == form.active_field { Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD) } else { Style::default().fg(Color::DarkGray) };
-                    let hint = if i == 1 && i == form.active_field { " ◀ ▶" } else { "" };
+                    let hint = if (i == 1 || i == 2) && i == form.active_field { " ◀ ▶" } else { "" };
                     let display = if value.is_empty() && !placeholder.is_empty() && i != form.active_field {
                         vec![Span::styled(format!("   {:>12}: ", label), label_style), Span::styled(placeholder.to_string(), Style::default().fg(Color::Rgb(80, 80, 80)))]
                     } else if value.is_empty() && !placeholder.is_empty() {
@@ -2731,7 +2823,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     if let Some(ref form) = app.proxy_form {
         let area = f.area();
         let w: u16 = 54;
-        let h: u16 = if form.editing_idx.is_some() { 15 } else { 13 };
+        let h: u16 = if form.mode_idx == 1 { 15 } else if form.editing_idx.is_some() { 16 } else { 14 };
         let x = (area.width.saturating_sub(w)) / 2;
         let y = (area.height.saturating_sub(h)) / 2;
         let popup_area = Rect::new(x, y, w, h);
@@ -2739,21 +2831,27 @@ fn ui(f: &mut Frame, app: &mut App) {
 
         let title = if form.editing_idx.is_some() { " Edit Proxy " } else { " New Proxy " };
         let protocol = PROTOCOLS[form.protocol_idx];
+        let mode = MODES[form.mode_idx];
         let remote_default_port = default_port(protocol);
 
         // field_idx, label, value, placeholder
         let mut rows: Vec<(usize, &str, &str, &str)> = vec![
             (0, "name", &form.fields[0], ""),
             (1, "protocol", protocol, ""),
+            (2, "mode", mode, ""),
         ];
-        if form.editing_idx.is_some() {
-            rows.push((2, "listen host", &form.fields[1], "127.0.0.1"));
-            rows.push((3, "listen port", &form.fields[2], ""));
-            rows.push((4, "remote host", &form.fields[3], "127.0.0.1"));
-            rows.push((5, "remote port", &form.fields[4], remote_default_port));
+        if form.mode_idx == 1 {
+            rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
+            rows.push((4, "remote port", &form.fields[4], remote_default_port));
+            rows.push((5, "interface", &form.fields[5], "lo0"));
+        } else if form.editing_idx.is_some() {
+            rows.push((3, "listen host", &form.fields[1], "127.0.0.1"));
+            rows.push((4, "listen port", &form.fields[2], ""));
+            rows.push((5, "remote host", &form.fields[3], "127.0.0.1"));
+            rows.push((6, "remote port", &form.fields[4], remote_default_port));
         } else {
-            rows.push((2, "remote host", &form.fields[3], "127.0.0.1"));
-            rows.push((3, "remote port", &form.fields[4], remote_default_port));
+            rows.push((3, "remote host", &form.fields[3], "127.0.0.1"));
+            rows.push((4, "remote port", &form.fields[4], remote_default_port));
         }
 
         let mut lines: Vec<Line> = Vec::new();
@@ -2764,7 +2862,7 @@ fn ui(f: &mut Frame, app: &mut App) {
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            let hint = if i == 1 && i == form.active_field { " ◀ ▶" } else { "" };
+            let hint = if (i == 1 || i == 2) && i == form.active_field { " ◀ ▶" } else { "" };
             let display = if value.is_empty() && !placeholder.is_empty() && i != form.active_field {
                 vec![
                     Span::styled(format!("   {:>12}: ", label), label_style),
@@ -3113,7 +3211,7 @@ fn highlight_json_line(line: &str) -> Line<'static> {
 }
 
 
-fn save_proxy_config(config_path: &std::path::Path, _components: &[ComponentInfo], protocol: &str, editing_idx: Option<usize>, name: &str, listen: &str, remote: &str) {
+fn save_proxy_config(config_path: &std::path::Path, _components: &[ComponentInfo], protocol: &str, editing_idx: Option<usize>, name: &str, listen: &str, remote: &str, mode: &str, interface: &str) {
     let Ok(content) = std::fs::read_to_string(config_path) else { return };
     let Ok(mut doc) = content.parse::<toml_edit::DocumentMut>() else { return };
 
@@ -3125,20 +3223,44 @@ fn save_proxy_config(config_path: &std::path::Path, _components: &[ComponentInfo
         if let Some(table) = arr.get_mut(idx) {
             table["name"] = toml_edit::value(name);
             table["protocol"] = toml_edit::value(protocol);
-            table["listen"] = toml_edit::value(listen);
             table["remote"] = toml_edit::value(remote);
+            if mode == "capture" {
+                table["mode"] = toml_edit::value("capture");
+                table["interface"] = toml_edit::value(interface);
+                table.remove("listen");
+            } else {
+                table["listen"] = toml_edit::value(listen);
+                table.remove("mode");
+                table.remove("interface");
+            }
         }
     } else {
         // Add new
         let mut table = toml_edit::Table::new();
         table["name"] = toml_edit::value(name);
         table["protocol"] = toml_edit::value(protocol);
-        table["listen"] = toml_edit::value(listen);
         table["remote"] = toml_edit::value(remote);
+        if mode == "capture" {
+            table["mode"] = toml_edit::value("capture");
+            table["interface"] = toml_edit::value(interface);
+        } else {
+            table["listen"] = toml_edit::value(listen);
+        }
         arr.push(table);
     }
 
     let _ = std::fs::write(config_path, doc.to_string());
+}
+
+fn format_proxy_toml(name: &str, protocol: &str, listen: &str, remote: &str, mode: &str, interface: &str) -> String {
+    let mut s = format!("[[proxy]]\nname = \"{}\"\nprotocol = \"{}\"\nremote = \"{}\"\n", name, protocol, remote);
+    if mode == "capture" {
+        s.push_str(&format!("mode = \"capture\"\ninterface = \"{}\"\n", interface));
+    } else if !listen.is_empty() {
+        s.push_str(&format!("listen = \"{}\"\n", listen));
+    }
+    s.push('\n');
+    s
 }
 
 fn delete_proxy_from_config(config_path: &std::path::Path, name: &str) {

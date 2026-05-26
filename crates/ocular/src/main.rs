@@ -48,12 +48,25 @@ fn default_true() -> bool { true }
 pub struct ProxyConfig {
     pub name: String,
     pub protocol: String,
+    #[serde(default)]
     pub listen: String,
     pub remote: String,
+    #[serde(default)]
+    pub mode: ProxyMode,
+    #[serde(default)]
+    pub interface: Option<String>,
     #[serde(default)]
     pub exclude: Option<ExcludeConfig>,
     #[serde(default)]
     pub include: Option<ExcludeConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyMode {
+    #[default]
+    Proxy,
+    Capture,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -92,6 +105,39 @@ fn load_config() -> Result<(Config, PathBuf, PathBuf)> {
         }
     }
     anyhow::bail!("config not found. Create ocular.toml in current directory or ~/.config/ocular/ocular.toml")
+}
+
+fn validate_config(config: &Config) -> Result<()> {
+    use std::collections::HashSet;
+    let mut capture_remotes: HashSet<&str> = HashSet::new();
+    let mut proxy_remotes: HashSet<&str> = HashSet::new();
+
+    for p in &config.proxy {
+        match p.mode {
+            ProxyMode::Capture => {
+                if p.interface.is_none() {
+                    anyhow::bail!("[{}] mode = \"capture\" requires 'interface' field", p.name);
+                }
+                capture_remotes.insert(&p.remote);
+            }
+            ProxyMode::Proxy => {
+                if p.listen.is_empty() {
+                    anyhow::bail!("[{}] mode = \"proxy\" requires 'listen' field", p.name);
+                }
+                proxy_remotes.insert(&p.remote);
+            }
+        }
+    }
+
+    for remote in &capture_remotes {
+        if proxy_remotes.contains(remote) {
+            anyhow::bail!(
+                "remote '{}' is configured in both proxy and capture mode — this would produce duplicate events",
+                remote
+            );
+        }
+    }
+    Ok(())
 }
 
 fn init_tracing(log_dir: &std::path::Path) {
@@ -188,15 +234,37 @@ fn spawn_proxy(
             tracing::warn!(protocol = %cfg.protocol, "unknown protocol, defaulting to redis");
             ocular_protocol::Protocol::Redis
         });
-    let listen = cfg.listen.clone();
-    let remote = cfg.remote.clone();
-    let name = cfg.name.clone();
-    let status = status.clone();
-    let handle = tokio::spawn(async move {
-        if let Err(e) = ocular_proxy::run_proxy(listen, remote, name, protocol, tx, shutdown_rx, status).await {
-            tracing::error!(error = %e, "proxy fatal error");
+
+    let handle = match cfg.mode {
+        ProxyMode::Capture => {
+            let capture_cfg = ocular_capture::CaptureConfig {
+                name: cfg.name.clone(),
+                protocol,
+                interface: cfg.interface.clone().unwrap_or_else(|| "lo0".to_string()),
+                remote: cfg.remote.clone(),
+            };
+            let name = cfg.name.clone();
+            let shutdown_rx = shutdown_rx.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ocular_capture::run_capture(capture_cfg, tx.clone(), shutdown_rx).await {
+                    let _ = tx.send(ocular_proxy::ProxyEvent::system_event(&name, format!("capture error: {}", e)));
+                    tracing::error!(error = %e, "capture fatal error");
+                }
+            })
         }
-    });
+        ProxyMode::Proxy => {
+            let listen = cfg.listen.clone();
+            let remote = cfg.remote.clone();
+            let name = cfg.name.clone();
+            let status = status.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ocular_proxy::run_proxy(listen, remote, name, protocol, tx, shutdown_rx, status).await {
+                    tracing::error!(error = %e, "proxy fatal error");
+                }
+            })
+        }
+    };
+
     ProxyHandle { shutdown_tx, handle, config: cfg_clone }
 }
 
@@ -221,6 +289,7 @@ async fn main() -> Result<()> {
     }
 
     let (config, config_dir, config_path) = load_config()?;
+    validate_config(&config)?;
     init_tracing(&config_dir);
     info!(proxies = config.proxy.len(), config_dir = %config_dir.display(), "ocular starting");
 
