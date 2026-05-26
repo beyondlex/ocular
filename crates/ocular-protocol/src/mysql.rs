@@ -153,7 +153,7 @@ impl MysqlPacket {
                     MysqlCommand::InitDb => "USE",
                     MysqlCommand::FieldList => "FIELD_LIST",
                     MysqlCommand::Other(c) => return format!("CMD(0x{:02x})", c),
-                    MysqlCommand::Query => unreachable!(),
+                    MysqlCommand::Query => "QUERY",
                 };
                 if self.payload.is_empty() || self.payload == cmd {
                     cmd.to_string()

@@ -116,6 +116,7 @@ struct DashboardState {
     detail_selected: usize,
     detail_group_name: String,
     detail_delete_confirm: bool,
+    fuzzy_matcher: SkimMatcherV2,
 }
 
 #[derive(Clone)]
@@ -162,16 +163,15 @@ impl DashboardState {
                 groups.push(DashboardGroup { name, proxies });
             }
         }
-        Self { groups, selected: 0, filter: String::new(), filter_active: false, new_group_name: String::new(), new_group_proxies: Vec::new(), error: None, rename_input: String::new(), delete_confirm: false, detail_proxies: Vec::new(), detail_selected: 0, detail_group_name: String::new(), detail_delete_confirm: false }
+        Self { groups, selected: 0, filter: String::new(), filter_active: false, new_group_name: String::new(), new_group_proxies: Vec::new(), error: None, rename_input: String::new(), delete_confirm: false, detail_proxies: Vec::new(), detail_selected: 0, detail_group_name: String::new(), detail_delete_confirm: false, fuzzy_matcher: SkimMatcherV2::default() }
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
         if self.filter.is_empty() {
             (0..self.groups.len()).collect()
         } else {
-            let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
             self.groups.iter().enumerate().filter(|(_, g)| {
-                matcher.fuzzy_match(&g.name, &self.filter).is_some()
+                self.fuzzy_matcher.fuzzy_match(&g.name, &self.filter).is_some()
             }).map(|(i, _)| i).collect()
         }
     }
@@ -264,7 +264,7 @@ struct App {
     confirm_quit: bool,
     quit_confirm_enabled: bool,
     visual_mode: bool,
-    visual_anchor: usize, // start of visual selection
+    visual_anchor: usize,
     theme: Theme,
     paused: bool,
     paused_buffer: Vec<ocular_protocol::ProxyEvent>,
@@ -273,38 +273,40 @@ struct App {
     event_format: EventFormat,
     latency_threshold_ms: Option<f64>,
     fuzzy_filter: bool,
-    // Proxy CRUD state
     proxy_form: Option<ProxyForm>,
     delete_confirm_idx: Option<usize>,
     info_popup_idx: Option<usize>,
     component_filter: String,
     config_path: PathBuf,
-    // Group state
     group_dir: Option<PathBuf>,
     active_group: Option<String>,
     group_picker: Option<GroupPicker>,
     proxy_change_tx: Option<broadcast::Sender<ProxyChange>>,
-    // Mode state
     mode: AppMode,
     dashboard: DashboardState,
     main_config_path: PathBuf,
+    // Cached resources
+    fuzzy_matcher: SkimMatcherV2,
+    dirty: bool,
+    cached_filtered_indices: Vec<usize>,
+    /// Cache key: (events.len, filter, component_idx, fuzzy_filter)
+    /// None = cache needs recompute
+    cached_filter_key: Option<(usize, String, Option<usize>, bool)>,
 }
 
 fn filtered_component_indices(app: &App) -> Vec<usize> {
     if app.component_filter.is_empty() {
         (0..app.components.len()).collect()
     } else {
-        let matcher = SkimMatcherV2::default();
         app.components.iter().enumerate().filter(|(_, c)| {
             let target = format!("{} {} {}", c.name, c.listen, c.listen);
-            matcher.fuzzy_match(&target, &app.component_filter).is_some()
+            app.fuzzy_matcher.fuzzy_match(&target, &app.component_filter).is_some()
         }).map(|(i, _)| i).collect()
     }
 }
 
 impl App {
     fn filtered_events(&self) -> Vec<(usize, &ProxyEvent, Vec<usize>)> {
-        let matcher = SkimMatcherV2::default();
         self.events.iter().enumerate().filter_map(|(i, ev)| {
             if let Some(idx) = self.component_idx {
                 if let Some(c) = self.components.get(idx) {
@@ -313,10 +315,10 @@ impl App {
             }
             if !self.filter.is_empty() {
                 if self.fuzzy_filter {
-                    if let Some((_, indices)) = matcher.fuzzy_indices(&ev.command, &self.filter) {
+                    if let Some((_, indices)) = self.fuzzy_matcher.fuzzy_indices(&ev.command, &self.filter) {
                         return Some((i, ev, indices));
                     }
-                    if matcher.fuzzy_match(&ev.component, &self.filter).is_some() {
+                    if self.fuzzy_matcher.fuzzy_match(&ev.component, &self.filter).is_some() {
                         return Some((i, ev, vec![]));
                     }
                     return None;
@@ -330,6 +332,38 @@ impl App {
             }
             Some((i, ev, vec![]))
         }).collect()
+    }
+
+    fn refresh_filter_cache(&mut self) {
+        let key = (self.events.len(), self.filter.clone(), self.component_idx, self.fuzzy_filter);
+        if self.cached_filter_key.as_ref() != Some(&key) {
+            self.cached_filtered_indices = self.events.iter().enumerate().filter_map(|(i, ev)| {
+                if let Some(idx) = self.component_idx {
+                    if let Some(c) = self.components.get(idx) {
+                        if ev.component != c.name { return None; }
+                    }
+                }
+                if !self.filter.is_empty() {
+                    if self.fuzzy_filter {
+                        if self.fuzzy_matcher.fuzzy_match(&ev.command, &self.filter).is_some() {
+                            return Some(i);
+                        }
+                        if self.fuzzy_matcher.fuzzy_match(&ev.component, &self.filter).is_some() {
+                            return Some(i);
+                        }
+                        return None;
+                    } else {
+                        let q = self.filter.to_lowercase();
+                        if !ev.component.to_lowercase().contains(&q)
+                            && !ev.command.to_lowercase().contains(&q) {
+                            return None;
+                        }
+                    }
+                }
+                Some(i)
+            }).collect();
+            self.cached_filter_key = Some(key);
+        }
     }
 }
 
@@ -515,6 +549,10 @@ pub async fn run(
             &main_config_path,
         ),
         main_config_path: main_config_path.clone(),
+        fuzzy_matcher: SkimMatcherV2::default(),
+        dirty: true,
+        cached_filtered_indices: Vec::new(),
+        cached_filter_key: None,
     };
 
     let mut last_mtime = SystemTime::UNIX_EPOCH;
@@ -981,14 +1019,18 @@ pub async fn run(
                 app.paused_buffer.push(ev);
             } else {
                 app.events.push(ev);
+                app.dirty = true;
                 if app.follow && app.focus == Focus::Events && app.filter.is_empty() {
-                    let filtered = app.filtered_events();
-                    app.selected = filtered.len().saturating_sub(1);
+                    app.refresh_filter_cache();
+                    app.selected = app.cached_filtered_indices.len().saturating_sub(1);
                 }
             }
         }
 
-        terminal.draw(|f| ui(f, &mut app))?;
+        if app.dirty {
+            terminal.draw(|f| ui(f, &mut app))?;
+            app.dirty = false;
+        }
 
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(key) = event::read()? {
@@ -1162,10 +1204,11 @@ pub async fn run(
                         KeyCode::Esc => {
                             app.component_filter.clear();
                             app.focus = Focus::Components;
+                            app.dirty = true;
                         }
-                        KeyCode::Enter => { app.focus = Focus::Components; }
-                        KeyCode::Backspace => { app.component_filter.pop(); }
-                        KeyCode::Char(c) => { app.component_filter.push(c); }
+                        KeyCode::Enter => { app.focus = Focus::Components; app.dirty = true; }
+                        KeyCode::Backspace => { app.component_filter.pop(); app.dirty = true; }
+                        KeyCode::Char(c) => { app.component_filter.push(c); app.dirty = true; }
                         _ => {}
                     }
                     continue;
@@ -1173,10 +1216,10 @@ pub async fn run(
 
                 if app.focus == Focus::Filter {
                     match key.code {
-                        KeyCode::Esc => { app.focus = Focus::Events; }
-                        KeyCode::Enter => { app.focus = Focus::Events; app.selected = 0; }
-                        KeyCode::Backspace => { app.filter.pop(); app.selected = 0; }
-                        KeyCode::Char(c) => { app.filter.push(c); app.selected = 0; }
+                        KeyCode::Esc => { app.focus = Focus::Events; app.dirty = true; }
+                        KeyCode::Enter => { app.focus = Focus::Events; app.selected = 0; app.dirty = true; }
+                        KeyCode::Backspace => { app.filter.pop(); app.selected = 0; app.dirty = true; }
+                        KeyCode::Char(c) => { app.filter.push(c); app.selected = 0; app.dirty = true; }
                         _ => {}
                     }
                     continue;
@@ -1214,14 +1257,15 @@ pub async fn run(
                         KeyCode::Char('k') => { app.focus = Focus::Events; }
                         KeyCode::Char('h') => { app.focus = Focus::Components; }
                         KeyCode::Char('l') => { app.focus = Focus::Events; }
-                        KeyCode::Char('c') => { app.events.clear(); app.selected = 0; }
+                        KeyCode::Char('c') => { app.events.clear(); app.selected = 0; app.dirty = true; }
                         KeyCode::Char('f') => { app.follow = !app.follow; }
                         KeyCode::Char('p') => {
                             app.paused = !app.paused;
                             if !app.paused && !app.paused_buffer.is_empty() {
                                 app.events.append(&mut app.paused_buffer);
-                                let filtered = app.filtered_events();
-                                app.selected = filtered.len().saturating_sub(1);
+                                app.dirty = true;
+                                app.refresh_filter_cache();
+                                app.selected = app.cached_filtered_indices.len().saturating_sub(1);
                             }
                         }
                         KeyCode::Char(',') => {
@@ -1294,16 +1338,19 @@ pub async fn run(
                             app.focus = Focus::Events;
                         } else if app.focus == Focus::Components && !app.component_filter.is_empty() {
                             app.component_filter.clear();
+                            app.dirty = true;
                         } else if !app.filter.is_empty() {
                             app.filter.clear();
                             app.selected = 0;
                             app.focus = Focus::Events;
+                            app.dirty = true;
                         } else if app.visual_mode {
                             app.visual_mode = false;
                         } else {
                             app.component_idx = None;
                             app.selected = 0;
                             app.focus = Focus::Events;
+                            app.dirty = true;
                         }
                     }
                     KeyCode::Tab => {
@@ -1333,7 +1380,8 @@ pub async fn run(
                     }
                     KeyCode::Char('G') if app.focus == Focus::Events => {
                         app.pending_keys.clear();
-                        let max = app.filtered_events().len().saturating_sub(1);
+                        app.refresh_filter_cache();
+                        let max = app.cached_filtered_indices.len().saturating_sub(1);
                         app.selected = max;
                         app.detail_scroll = 0;
                         app.follow = true;
@@ -1345,7 +1393,8 @@ pub async fn run(
                     KeyCode::Char('g') if app.focus == Focus::Events => {
                         if app.pending_keys.ends_with('g') {
                             let num_str: String = app.pending_keys.chars().take_while(|c| c.is_ascii_digit()).collect();
-                            let max = app.filtered_events().len().saturating_sub(1);
+                            app.refresh_filter_cache();
+                            let max = app.cached_filtered_indices.len().saturating_sub(1);
                             if num_str.is_empty() {
                                 app.selected = 0;
                             } else if let Ok(n) = num_str.parse::<usize>() {
@@ -1461,7 +1510,8 @@ pub async fn run(
                                 app.selected = 0;
                             }
                             Focus::Events => {
-                                let max = app.filtered_events().len().saturating_sub(1);
+                                app.refresh_filter_cache();
+                                let max = app.cached_filtered_indices.len().saturating_sub(1);
                                 if app.selected < max {
                                     app.selected += 1;
                                     app.detail_scroll = 0;
@@ -1525,6 +1575,7 @@ pub async fn run(
                     }
                     _ => { app.pending_keys.clear(); }
                 }
+                app.dirty = true;
             }
         }
     }

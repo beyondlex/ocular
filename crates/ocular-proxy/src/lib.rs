@@ -1,10 +1,10 @@
 use anyhow::Result;
-use ocular_protocol::{Protocol, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len};
-use std::sync::Arc;
+use ocular_protocol::{Protocol, mysql::mysql_response_complete, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 use tracing::{info, warn, error, debug};
 
 pub use ocular_protocol::ProxyEvent;
@@ -174,9 +174,9 @@ async fn handle_conn(
     let dest_resp = dest;
     let client_to_server = async move {
         let mut buf = [0u8; 65536];
-        let mut http_req_buf: Vec<u8> = Vec::new();
-        let mut memcached_req_buf: Vec<u8> = Vec::new();
-        let mut kafka_req_buf: Vec<u8> = Vec::new();
+        let mut http_req_buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut memcached_req_buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut kafka_req_buf: Vec<u8> = Vec::with_capacity(4096);
         loop {
             let n = cr.read(&mut buf).await?;
             if n == 0 { break; }
@@ -213,7 +213,7 @@ async fn handle_conn(
                                 });
                             } else {
                                 debug!(component = %name_req, command = %method.summary);
-                                *pending_w.lock().await = Some(PendingRequest {
+                                *pending_w.lock().unwrap() = Some(PendingRequest {
                                     timestamp: SystemTime::now(),
                                     instant: Instant::now(),
                                     command: method.summary.clone(),
@@ -229,7 +229,7 @@ async fn handle_conn(
                 if ocular_protocol::http::http_request_complete(&http_req_buf) {
                     if let Some(command) = parse_request(protocol, &http_req_buf) {
                         let full_command = extract_full_command(protocol, &http_req_buf).unwrap_or_else(|| command.clone());
-                        *pending_w.lock().await = Some(PendingRequest {
+                        *pending_w.lock().unwrap() = Some(PendingRequest {
                             timestamp: SystemTime::now(),
                             instant: Instant::now(),
                             command,
@@ -243,7 +243,7 @@ async fn handle_conn(
                 if ocular_protocol::memcached::memcached_request_complete(&memcached_req_buf) {
                     if let Some(command) = parse_request(protocol, &memcached_req_buf) {
                         let full_command = extract_full_command(protocol, &memcached_req_buf).unwrap_or_else(|| command.clone());
-                        *pending_w.lock().await = Some(PendingRequest {
+                        *pending_w.lock().unwrap() = Some(PendingRequest {
                             timestamp: SystemTime::now(),
                             instant: Instant::now(),
                             command,
@@ -259,7 +259,7 @@ async fn handle_conn(
                     let frame = &kafka_req_buf[..frame_len];
                     if let Some(command) = parse_request(protocol, frame) {
                         let full_command = extract_full_command(protocol, frame).unwrap_or_else(|| command.clone());
-                        *pending_w.lock().await = Some(PendingRequest {
+                        *pending_w.lock().unwrap() = Some(PendingRequest {
                             timestamp: SystemTime::now(),
                             instant: Instant::now(),
                             command,
@@ -271,7 +271,7 @@ async fn handle_conn(
             } else if let Some(command) = parse_request(protocol, data) {
                 let full_command = extract_full_command(protocol, data).unwrap_or_else(|| command.clone());
                 debug!(component = %name_req, %command);
-                *pending_w.lock().await = Some(PendingRequest {
+                *pending_w.lock().unwrap() = Some(PendingRequest {
                     timestamp: SystemTime::now(),
                     instant: Instant::now(),
                     command,
@@ -289,10 +289,10 @@ async fn handle_conn(
     let process_mysql = process_info.clone();
     let server_to_client = async move {
         let mut buf = [0u8; 65536];
-        let mut mysql_buf: Vec<u8> = Vec::new();
-        let mut http_resp_buf: Vec<u8> = Vec::new();
-        let mut memcached_resp_buf: Vec<u8> = Vec::new();
-        let mut kafka_resp_buf: Vec<u8> = Vec::new();
+        let mut mysql_buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut http_resp_buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut memcached_resp_buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut kafka_resp_buf: Vec<u8> = Vec::with_capacity(4096);
         let mut awaiting_response = false;
         let mut memcached_awaiting = false;
         loop {
@@ -302,12 +302,12 @@ async fn handle_conn(
             cw.write_all(data).await?;
 
             if protocol == Protocol::Mysql {
-                let has_pending = pending_r.lock().await.is_some();
+                let has_pending = pending_r.lock().unwrap().is_some();
                 if has_pending || awaiting_response {
                     awaiting_response = true;
                     mysql_buf.extend_from_slice(data);
                     if mysql_response_complete(&mysql_buf) {
-                        if let Some(req) = pending_r.lock().await.take() {
+                        if let Some(req) = pending_r.lock().unwrap().take() {
                             let latency = req.instant.elapsed();
                             let response = parse_response(protocol, &mysql_buf).unwrap_or_default();
                             let response_detail = format_response_detail(protocol, &mysql_buf).unwrap_or_default();
@@ -332,7 +332,7 @@ async fn handle_conn(
             } else if protocol == Protocol::Http {
                 http_resp_buf.extend_from_slice(data);
                 if ocular_protocol::http::http_response_complete(&http_resp_buf) {
-                    if let Some(req) = pending_r.lock().await.take() {
+                    if let Some(req) = pending_r.lock().unwrap().take() {
                         let latency = req.instant.elapsed();
                         let response = parse_response(protocol, &http_resp_buf).unwrap_or_default();
                         let response_detail = format_response_detail(protocol, &http_resp_buf).unwrap_or_else(|| response.clone());
@@ -394,7 +394,7 @@ async fn handle_conn(
                         peek += plen;
                     }
 
-                    if let Some(req) = pending_r.lock().await.take() {
+                    if let Some(req) = pending_r.lock().unwrap().take() {
                         let latency = req.instant.elapsed();
                         let mut response = parse_response(protocol, frame_data).unwrap_or_default();
                         let mut response_detail = format_response_detail(protocol, frame_data).unwrap_or_else(|| response.clone());
@@ -447,7 +447,7 @@ async fn handle_conn(
                 // Use parse_postgres_response which scans all messages and prioritizes errors
                 let is_meaningful = matches!(first, b'C' | b'E' | b'T' | b'Z' | b'I' | b'D' | b'R');
                 if is_meaningful {
-                    if let Some(req) = pending_r.lock().await.take() {
+                    if let Some(req) = pending_r.lock().unwrap().take() {
                         let latency = req.instant.elapsed();
                         let response = parse_response(protocol, data).unwrap_or_default();
                         let response_detail = format_response_detail(protocol, data).unwrap_or_else(|| response.clone());
@@ -468,12 +468,12 @@ async fn handle_conn(
                 }
                 // ParameterStatus (S), BackendKeyData (K), etc. are silently skipped
             } else if protocol == Protocol::Memcached {
-                let has_pending = pending_r.lock().await.is_some();
+                let has_pending = pending_r.lock().unwrap().is_some();
                 if has_pending || memcached_awaiting {
                     memcached_awaiting = true;
                     memcached_resp_buf.extend_from_slice(data);
                     if ocular_protocol::memcached::memcached_response_complete(&memcached_resp_buf) {
-                        if let Some(req) = pending_r.lock().await.take() {
+                        if let Some(req) = pending_r.lock().unwrap().take() {
                             let latency = req.instant.elapsed();
                             let response = parse_response(protocol, &memcached_resp_buf).unwrap_or_default();
                             let response_detail = format_response_detail(protocol, &memcached_resp_buf).unwrap_or_else(|| response.clone());
@@ -499,7 +499,7 @@ async fn handle_conn(
                 kafka_resp_buf.extend_from_slice(data);
                 while ocular_protocol::kafka::kafka_frame_complete(&kafka_resp_buf) {
                     let frame_len = i32::from_be_bytes([kafka_resp_buf[0], kafka_resp_buf[1], kafka_resp_buf[2], kafka_resp_buf[3]]) as usize + 4;
-                    if let Some(req) = pending_r.lock().await.take() {
+                    if let Some(req) = pending_r.lock().unwrap().take() {
                         let latency = req.instant.elapsed();
                         let response = parse_response(protocol, &kafka_resp_buf[..frame_len]).unwrap_or_default();
                         let response_detail = format_response_detail(protocol, &kafka_resp_buf[..frame_len]).unwrap_or_else(|| response.clone());
@@ -521,7 +521,7 @@ async fn handle_conn(
                 }
             } else {
                 // Redis/MongoDB: single request/response per read
-                if let Some(req) = pending_r.lock().await.take() {
+                if let Some(req) = pending_r.lock().unwrap().take() {
                     let latency = req.instant.elapsed();
                     let response = parse_response(protocol, data).unwrap_or_default();
                     let response_detail = format_response_detail(protocol, data).unwrap_or_else(|| response.clone());
@@ -549,29 +549,6 @@ async fn handle_conn(
         r = server_to_client => r?,
     }
     Ok(())
-}
-
-fn mysql_response_complete(buf: &[u8]) -> bool {
-    if buf.len() < 5 { return false; }
-    let first_marker = buf[4];
-    match first_marker {
-        0x00 | 0xff => return true,
-        _ => {}
-    }
-    let mut pos = 0;
-    let mut last_marker = 0u8;
-    let mut last_pkt_len = 0usize;
-    while pos + 4 <= buf.len() {
-        let pkt_len = (buf[pos] as usize) | (buf[pos+1] as usize) << 8 | (buf[pos+2] as usize) << 16;
-        let end = pos + 4 + pkt_len;
-        if end > buf.len() { break; }
-        if pkt_len > 0 {
-            last_marker = buf[pos + 4];
-            last_pkt_len = pkt_len;
-        }
-        pos = end;
-    }
-    (last_marker == 0xfe && last_pkt_len < 9) || (last_marker == 0x00 && last_pkt_len < 16 && pos == buf.len())
 }
 
 fn strip_mysql_ssl_flag(packet: &mut [u8]) {
@@ -681,5 +658,74 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
             rustls::SignatureScheme::RSA_PSS_SHA512,
             rustls::SignatureScheme::ED25519,
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_strip_mysql_ssl_flag_short_packet() {
+        let mut buf = vec![0u8; 3];
+        strip_mysql_ssl_flag(&mut buf);
+        assert_eq!(buf, vec![0u8; 3]);
+    }
+
+    #[test]
+    fn test_strip_mysql_ssl_flag_not_greeting() {
+        let mut buf = vec![0u8; 10];
+        buf[4] = 9;
+        strip_mysql_ssl_flag(&mut buf);
+        assert_eq!(buf[4], 9);
+    }
+
+    /// Find the capability flags offset in a MySQL greeting packet
+    fn caps_offset(pkt: &[u8]) -> Option<usize> {
+        if pkt.len() < 5 { return None; }
+        let mut pos = 5;
+        // Skip null-terminated server version
+        while pos < pkt.len() && pkt[pos] != 0 { pos += 1; }
+        pos += 1; // null
+        if pos + 13 > pkt.len() { return None; }
+        pos += 4; // thread id
+        pos += 8; // salt part 1
+        pos += 1; // filler
+        Some(pos)
+    }
+
+    #[test]
+    fn test_strip_mysql_ssl_flag_clears_ssl_bit() {
+        let version = b"5.7.0\0";
+        let mut payload = vec![10]; // protocol version
+        payload.extend_from_slice(version);
+        payload.extend_from_slice(&[0u8; 4]); // thread id
+        payload.extend_from_slice(&[0u8; 8]); // salt part 1
+        payload.push(0); // filler
+        let caps: u16 = 0x0800; // SSL flag set
+        payload.extend_from_slice(&caps.to_le_bytes());
+        payload.extend_from_slice(&[0u8; 13]);
+
+        let pkt_len = payload.len();
+        let mut pkt = vec![
+            (pkt_len & 0xff) as u8,
+            ((pkt_len >> 8) & 0xff) as u8,
+            ((pkt_len >> 16) & 0xff) as u8,
+            0,
+        ];
+        pkt.extend_from_slice(&payload);
+
+        let off = caps_offset(&pkt).unwrap();
+        assert!(u16::from_le_bytes([pkt[off], pkt[off + 1]]) & 0x0800 != 0);
+
+        strip_mysql_ssl_flag(&mut pkt);
+
+        assert_eq!(u16::from_le_bytes([pkt[off], pkt[off + 1]]) & 0x0800, 0);
+    }
+
+    #[test]
+    fn test_resolve_peer_process_does_not_panic() {
+        let result = std::panic::catch_unwind(|| resolve_peer_process(0));
+        assert!(result.is_ok());
     }
 }
