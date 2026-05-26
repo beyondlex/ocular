@@ -77,9 +77,42 @@ Your App ──→ Ocular Proxy (16379) ──→ Redis (6379)
 
 > **Note:** For MySQL, use `-h 127.0.0.1` (not `localhost`) to ensure TCP connection through the proxy.
 
+### Passive capture mode (no config changes)
+
+Observe traffic without modifying your application's connection settings. Ocular captures packets directly from the network interface using libpcap.
+
+```toml
+[[proxy]]
+name = "redis"
+protocol = "redis"
+mode = "capture"
+interface = "lo0"           # lo0 for loopback, en0 for LAN
+remote = "127.0.0.1:6379"  # The real service address
+```
+
+```bash
+sudo ocular   # Requires BPF permissions for packet capture
+# Or: sudo chmod g+r /dev/bpf* && ocular  (no sudo needed after this)
+```
+
+```
+Your App ──→ Redis (6379)    # Direct connection, no changes
+                │
+         libpcap captures
+                │
+          TUI Dashboard
+```
+
+> **Note:** Capture mode and proxy mode are mutually exclusive per service. Use one or the other.
+
 ## How It Works
 
-Ocular runs lightweight TCP proxies between your application and middleware. Traffic flows through transparently while Ocular parses the wire protocol and displays structured events in a terminal dashboard.
+Ocular supports two modes:
+
+- **Proxy mode** (default) — lightweight TCP proxies sit between your app and middleware. You point your app to the proxy port.
+- **Capture mode** — passive packet capture via libpcap (macOS) observes traffic on the wire. No connection changes needed, but requires elevated permissions.
+
+In both modes, Ocular parses the wire protocol and displays structured events in a terminal dashboard.
 
 ## Features
 
@@ -298,6 +331,7 @@ cargo build --release
 ```
 crates/
 ├── ocular/            # Binary entry point, config loading
+├── ocular-capture/    # Passive packet capture (libpcap, TCP reassembly)
 ├── ocular-protocol/   # Wire protocol parsers (RESP, MySQL, PG, AMQP, MongoDB, HTTP)
 ├── ocular-proxy/      # Async TCP proxy with event broadcasting
 └── ocular-tui/        # Terminal UI (ratatui)
