@@ -237,6 +237,8 @@ fn spawn_proxy(
 
     let handle = match cfg.mode {
         ProxyMode::Capture => {
+            #[cfg(feature = "capture")]
+            {
             let capture_cfg = ocular_capture::CaptureConfig {
                 name: cfg.name.clone(),
                 protocol,
@@ -251,6 +253,13 @@ fn spawn_proxy(
                     tracing::error!(error = %e, "capture fatal error");
                 }
             })
+            }
+            #[cfg(not(feature = "capture"))]
+            {
+            let name = cfg.name.clone();
+            let _ = tx.send(ocular_proxy::ProxyEvent::system_event(&name, "capture mode not supported on this platform".into()));
+            tokio::spawn(async {})
+            }
         }
         ProxyMode::Proxy => {
             let listen = cfg.listen.clone();

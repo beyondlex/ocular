@@ -26,4 +26,8 @@ chrono.workspace = true
 ocular-proxy = { path = "../ocular-proxy", version = "0.10.0" }
 ocular-tui = { path = "../ocular-tui", version = "0.10.0" }
 ocular-protocol = { path = "../ocular-protocol", version = "0.10.0" }
-ocular-capture = { path = "../ocular-capture", version = "0.10.0" }
+ocular-capture = { path = "../ocular-capture", version = "0.10.0", optional = true }
+
+[features]
+default = ["capture"]
+capture = ["dep:ocular-capture"]
