@@ -193,42 +193,47 @@ fn default_port(protocol: &str) -> &'static str {
     }
 }
 
-/// Fields: 0=name, 1=protocol(selector), 2=listen_host, 3=listen_port, 4=remote_host, 5=remote_port
+/// Fields: 0=name, 1=protocol(selector), 2=remote_host, 3=remote_port
 #[derive(Default)]
 struct ProxyForm {
-    fields: [String; 6],
+    fields: [String; 4],
     active_field: usize,
     editing_idx: Option<usize>,
     protocol_idx: usize,
     error: Option<String>,
+    /// Existing listen addr for edit mode (reused on save)
+    existing_listen: Option<String>,
 }
 
 impl ProxyForm {
-    #[allow(dead_code)]
-    fn from_component(idx: usize, ci: &ComponentInfo) -> Self {
-        let protocol_idx = PROTOCOLS.iter().position(|&p| ci.name.contains(p) || ci.listen.contains(p)).unwrap_or(0);
-        let (lh, lp) = split_addr(&ci.listen);
-        Self {
-            fields: [ci.name.clone(), String::new(), lh, lp, String::new(), String::new()],
-            active_field: 0,
-            editing_idx: Some(idx),
-            protocol_idx,
-            error: None,
-        }
-    }
-
     fn from_entry(entry: &NewProxyEntry) -> Self {
         let protocol_idx = PROTOCOLS.iter().position(|&p| p == entry.protocol).unwrap_or(0);
-        let (lh, lp) = split_addr(&entry.listen);
         let (rh, rp) = split_addr(&entry.remote);
         Self {
-            fields: [entry.name.clone(), String::new(), lh, lp, rh, rp],
+            fields: [entry.name.clone(), String::new(), rh, rp],
             active_field: 0,
             editing_idx: None,
             protocol_idx,
             error: None,
+            existing_listen: Some(entry.listen.clone()),
         }
     }
+}
+
+fn auto_assign_listen_port(protocol: &str) -> String {
+    use std::net::TcpListener;
+    let base: u16 = match default_port(protocol).parse::<u16>() {
+        Ok(p) => p.saturating_add(10000),
+        Err(_) => 20000,
+    };
+    for offset in 0..1000 {
+        let port = base + offset;
+        let addr = format!("127.0.0.1:{}", port);
+        if TcpListener::bind(&addr).is_ok() {
+            return addr;
+        }
+    }
+    format!("127.0.0.1:{}", base)
 }
 
 fn split_addr(addr: &str) -> (String, String) {
@@ -727,23 +732,19 @@ pub async fn run(
                                 if let Some(ref mut form) = app.proxy_form {
                                     match key.code {
                                         KeyCode::Esc => { app.proxy_form = None; }
-                                        KeyCode::Tab => { form.active_field = (form.active_field + 1) % 6; form.error = None; }
-                                        KeyCode::BackTab => { form.active_field = (form.active_field + 5) % 6; form.error = None; }
+                                        KeyCode::Tab => { form.active_field = (form.active_field + 1) % 4; form.error = None; }
+                                        KeyCode::BackTab => { form.active_field = (form.active_field + 3) % 4; form.error = None; }
                                         KeyCode::Enter => {
                                             let protocol = PROTOCOLS[form.protocol_idx];
                                             let name = form.fields[0].trim().to_string();
-                                            let listen_host = if form.fields[2].is_empty() { "127.0.0.1" } else { form.fields[2].trim() };
-                                            let listen_port = form.fields[3].trim();
-                                            let remote_host = if form.fields[4].is_empty() { "127.0.0.1" } else { form.fields[4].trim() };
-                                            let remote_port = if form.fields[5].is_empty() { default_port(protocol) } else { form.fields[5].trim() };
+                                            let remote_host = if form.fields[2].is_empty() { "127.0.0.1" } else { form.fields[2].trim() };
+                                            let remote_port = if form.fields[3].is_empty() { default_port(protocol) } else { form.fields[3].trim() };
                                             if name.is_empty() {
                                                 form.error = Some("name is required".into());
-                                            } else if listen_port.is_empty() {
-                                                form.error = Some("listen port is required".into());
                                             } else if app.dashboard.new_group_proxies.iter().any(|p| p.name == name) {
                                                 form.error = Some(format!("name \"{}\" already exists", name));
                                             } else {
-                                                let listen = format!("{}:{}", listen_host, listen_port);
+                                                let listen = auto_assign_listen_port(protocol);
                                                 let remote = format!("{}:{}", remote_host, remote_port);
                                                 app.dashboard.new_group_proxies.push(NewProxyEntry {
                                                     name, protocol: protocol.to_string(), listen, remote,
@@ -826,24 +827,20 @@ pub async fn run(
                             if let Some(ref mut form) = app.proxy_form {
                                 match key.code {
                                     KeyCode::Esc => { app.proxy_form = None; }
-                                    KeyCode::Tab => { form.active_field = (form.active_field + 1) % 6; form.error = None; }
-                                    KeyCode::BackTab => { form.active_field = (form.active_field + 5) % 6; form.error = None; }
+                                    KeyCode::Tab => { form.active_field = (form.active_field + 1) % 4; form.error = None; }
+                                    KeyCode::BackTab => { form.active_field = (form.active_field + 3) % 4; form.error = None; }
                                     KeyCode::Enter => {
                                         let protocol = PROTOCOLS[form.protocol_idx];
                                         let name = form.fields[0].trim().to_string();
-                                        let listen_host = if form.fields[2].is_empty() { "127.0.0.1" } else { form.fields[2].trim() };
-                                        let listen_port = form.fields[3].trim();
-                                        let remote_host = if form.fields[4].is_empty() { "127.0.0.1" } else { form.fields[4].trim() };
-                                        let remote_port = if form.fields[5].is_empty() { default_port(protocol) } else { form.fields[5].trim() };
+                                        let remote_host = if form.fields[2].is_empty() { "127.0.0.1" } else { form.fields[2].trim() };
+                                        let remote_port = if form.fields[3].is_empty() { default_port(protocol) } else { form.fields[3].trim() };
                                         if name.is_empty() {
                                             form.error = Some("name is required".into());
-                                        } else if listen_port.is_empty() {
-                                            form.error = Some("listen port is required".into());
                                         } else if app.dashboard.detail_proxies.iter().any(|p| p.name == name)
                                             && form.editing_idx.is_none() {
                                             form.error = Some(format!("name \"{}\" already exists", name));
                                         } else {
-                                            let listen = format!("{}:{}", listen_host, listen_port);
+                                            let listen = form.existing_listen.clone().unwrap_or_else(|| auto_assign_listen_port(protocol));
                                             let remote = format!("{}:{}", remote_host, remote_port);
                                             if let Some(idx) = form.editing_idx {
                                                 if idx < app.dashboard.detail_proxies.len() {
@@ -1057,21 +1054,17 @@ pub async fn run(
                 if let Some(ref mut form) = app.proxy_form {
                     match key.code {
                         KeyCode::Esc => { app.proxy_form = None; }
-                        KeyCode::Tab => { form.active_field = (form.active_field + 1) % 6; form.error = None; }
-                        KeyCode::BackTab => { form.active_field = (form.active_field + 5) % 6; form.error = None; }
+                        KeyCode::Tab => { form.active_field = (form.active_field + 1) % 4; form.error = None; }
+                        KeyCode::BackTab => { form.active_field = (form.active_field + 3) % 4; form.error = None; }
                         KeyCode::Enter => {
                             let protocol = PROTOCOLS[form.protocol_idx];
                             let name = form.fields[0].trim().to_string();
-                            let listen_host = if form.fields[2].is_empty() { "127.0.0.1" } else { form.fields[2].trim() };
-                            let listen_port = if form.fields[3].is_empty() { "" } else { form.fields[3].trim() };
-                            let remote_host = if form.fields[4].is_empty() { "127.0.0.1" } else { form.fields[4].trim() };
-                            let remote_port = if form.fields[5].is_empty() { default_port(protocol) } else { form.fields[5].trim() };
+                            let remote_host = if form.fields[2].is_empty() { "127.0.0.1" } else { form.fields[2].trim() };
+                            let remote_port = if form.fields[3].is_empty() { default_port(protocol) } else { form.fields[3].trim() };
 
                             // Validation
                             if name.is_empty() {
                                 form.error = Some("name is required".into());
-                            } else if listen_port.is_empty() {
-                                form.error = Some("listen port is required".into());
                             } else if remote_port.is_empty() {
                                 form.error = Some("remote port is required".into());
                             } else {
@@ -1082,16 +1075,7 @@ pub async fn run(
                                 if name_taken {
                                     form.error = Some(format!("name \"{}\" already exists", name));
                                 } else {
-                                    // Port-in-use check for listen (skip if address unchanged in edit mode)
-                                    let listen_addr = format!("{}:{}", listen_host, listen_port);
-                                    let addr_unchanged = form.editing_idx.and_then(|i| app.components.get(i))
-                                        .is_some_and(|c| c.listen == listen_addr);
-                                    if !addr_unchanged {
-                                        if let Err(e) = check_port_available(&listen_addr) {
-                                            form.error = Some(e);
-                                            continue;
-                                        }
-                                    }
+                                    let listen_addr = form.existing_listen.clone().unwrap_or_else(|| auto_assign_listen_port(protocol));
                                     {
                                         let remote_addr = format!("{}:{}", remote_host, remote_port);
                                         let editing_idx = form.editing_idx;
@@ -1505,21 +1489,21 @@ pub async fn run(
                         app.pending_keys.clear();
                         if let Some(idx) = app.component_idx {
                             if let Some(ci) = app.components.get(idx) {
-                                let (lh, lp) = split_addr(&ci.listen);
                                 let mut form = ProxyForm {
-                                    fields: [ci.name.clone(), String::new(), lh, lp, String::new(), String::new()],
+                                    fields: [ci.name.clone(), String::new(), String::new(), String::new()],
                                     active_field: 0,
                                     editing_idx: Some(idx),
                                     protocol_idx: 0,
                                     error: None,
+                                    existing_listen: Some(ci.listen.clone()),
                                 };
                                 if let Ok(content) = std::fs::read_to_string(&app.config_path) {
                                     if let Ok(cfg) = toml::from_str::<ReloadableConfig>(&content) {
                                         if let Some(p) = cfg.proxy.iter().find(|p| p.name == ci.name) {
                                             form.protocol_idx = PROTOCOLS.iter().position(|&x| x == p.protocol).unwrap_or(0);
                                             let (rh, rp) = split_addr(&p.remote);
-                                            form.fields[4] = rh;
-                                            form.fields[5] = rp;
+                                            form.fields[2] = rh;
+                                            form.fields[3] = rp;
                                         }
                                     }
                                 }
@@ -1856,7 +1840,7 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
             // Proxy form popup if active
             if let Some(ref form) = app.proxy_form {
                 let fw: u16 = 50;
-                let fh: u16 = 13;
+                let fh: u16 = 11;
                 let fx = (area.width.saturating_sub(fw)) / 2;
                 let fy = (area.height.saturating_sub(fh)) / 2;
                 let popup_area = Rect::new(fx, fy, fw, fh);
@@ -1867,10 +1851,8 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                 let rows: Vec<(usize, &str, &str, &str)> = vec![
                     (0, "name", &form.fields[0], ""),
                     (1, "protocol", protocol, ""),
-                    (2, "listen host", &form.fields[2], "127.0.0.1"),
-                    (3, "listen port", &form.fields[3], ""),
-                    (4, "remote host", &form.fields[4], "127.0.0.1"),
-                    (5, "remote port", &form.fields[5], remote_default_port),
+                    (2, "remote host", &form.fields[2], "127.0.0.1"),
+                    (3, "remote port", &form.fields[3], remote_default_port),
                 ];
                 let mut form_lines: Vec<Line> = Vec::new();
                 for &(i, label, value, placeholder) in &rows {
@@ -1955,7 +1937,7 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
             // Proxy form popup
             if let Some(ref form) = app.proxy_form {
                 let fw: u16 = 50;
-                let fh: u16 = 13;
+                let fh: u16 = 11;
                 let fx = (area.width.saturating_sub(fw)) / 2;
                 let fy = (area.height.saturating_sub(fh)) / 2;
                 let popup_area = Rect::new(fx, fy, fw, fh);
@@ -1966,10 +1948,8 @@ fn ui_dashboard(f: &mut Frame, app: &App) {
                 let rows: Vec<(usize, &str, &str, &str)> = vec![
                     (0, "name", &form.fields[0], ""),
                     (1, "protocol", protocol, ""),
-                    (2, "listen host", &form.fields[2], "127.0.0.1"),
-                    (3, "listen port", &form.fields[3], ""),
-                    (4, "remote host", &form.fields[4], "127.0.0.1"),
-                    (5, "remote port", &form.fields[5], remote_default_port),
+                    (2, "remote host", &form.fields[2], "127.0.0.1"),
+                    (3, "remote port", &form.fields[3], remote_default_port),
                 ];
                 let mut form_lines: Vec<Line> = Vec::new();
                 for &(i, label, value, placeholder) in &rows {
@@ -2536,7 +2516,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     if let Some(ref form) = app.proxy_form {
         let area = f.area();
         let w: u16 = 54;
-        let h: u16 = 15;
+        let h: u16 = 13;
         let x = (area.width.saturating_sub(w)) / 2;
         let y = (area.height.saturating_sub(h)) / 2;
         let popup_area = Rect::new(x, y, w, h);
@@ -2550,10 +2530,8 @@ fn ui(f: &mut Frame, app: &mut App) {
         let rows: Vec<(usize, &str, &str, &str)> = vec![
             (0, "name", &form.fields[0], ""),
             (1, "protocol", protocol, ""),
-            (2, "listen host", &form.fields[2], "127.0.0.1"),
-            (3, "listen port", &form.fields[3], ""),
-            (4, "remote host", &form.fields[4], "127.0.0.1"),
-            (5, "remote port", &form.fields[5], remote_default_port),
+            (2, "remote host", &form.fields[2], "127.0.0.1"),
+            (3, "remote port", &form.fields[3], remote_default_port),
         ];
 
         let mut lines: Vec<Line> = Vec::new();
@@ -2888,13 +2866,6 @@ fn highlight_json_line(line: &str) -> Line<'static> {
     Line::from(spans)
 }
 
-fn check_port_available(addr: &str) -> Result<(), String> {
-    use std::net::TcpListener;
-    match TcpListener::bind(addr) {
-        Ok(_) => Ok(()),
-        Err(_) => Err(format!("port {} is already in use", addr)),
-    }
-}
 
 fn save_proxy_config(config_path: &std::path::Path, _components: &[ComponentInfo], protocol: &str, editing_idx: Option<usize>, name: &str, listen: &str, remote: &str) {
     let Ok(content) = std::fs::read_to_string(config_path) else { return };
