@@ -207,6 +207,7 @@ async fn handle_conn(
     let tx_req = tx.clone();
     let tx_resp = tx.clone();
     let pending_w = pending.clone();
+    let pending_final = pending.clone();
     let pending_r = pending;
     let process_info = process;
 
@@ -648,9 +649,20 @@ async fn handle_conn(
         Ok::<_, anyhow::Error>(())
     };
 
+    tokio::pin!(client_to_server);
+    tokio::pin!(server_to_client);
+
     tokio::select! {
-        r = client_to_server => r?,
-        r = server_to_client => r?,
+        r = &mut client_to_server => {
+            // Client closed write end; give server time to send final response
+            if r.is_ok() && pending_final.lock().unwrap().is_some() {
+                let _ = tokio::time::timeout(
+                    Duration::from_millis(500),
+                    &mut server_to_client,
+                ).await;
+            }
+        },
+        r = &mut server_to_client => r?,
     }
     Ok(())
 }
