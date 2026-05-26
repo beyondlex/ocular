@@ -4,6 +4,7 @@ use tokio::sync::broadcast;
 /// Integration test: requires Redis on 127.0.0.1:6379 and sudo/BPF permissions.
 /// Run with: sudo cargo test -p ocular-capture --test integration -- --nocapture
 #[tokio::test]
+#[ignore] // requires sudo/BPF permissions and Redis
 async fn capture_redis_traffic() {
     let (tx, mut rx) = broadcast::channel::<ocular_protocol::ProxyEvent>(1024);
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
