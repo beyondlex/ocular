@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ocular_protocol::{Protocol, mysql::mysql_response_complete, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len};
+use ocular_protocol::{Protocol, mysql::mysql_response_complete, postgres::postgres_response_complete, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -312,6 +312,32 @@ async fn handle_conn(
                     }
                     kafka_req_buf = kafka_req_buf[frame_len..].to_vec();
                 }
+            } else if protocol == Protocol::Postgres {
+                // Postgres: scan all messages in this read, keep SQL from Q/P only
+                let mut pos = 0;
+                while pos < data.len() {
+                    let first = data[pos];
+                    let is_typed = matches!(first, b'Q' | b'P' | b'B' | b'E' | b'D' | b'S' | b'X' | b'C' | b'p' | b'H' | b'F' | b'd' | b'c' | b'f');
+                    if !is_typed { break; } // startup/untyped — stop
+                    if pos + 5 > data.len() { break; }
+                    let len = u32::from_be_bytes([data[pos+1], data[pos+2], data[pos+3], data[pos+4]]) as usize;
+                    let end = pos + 1 + len;
+                    if end > data.len() { break; }
+                    // Only set pending for Q (simple query) or P (Parse with SQL)
+                    if first == b'Q' || first == b'P' {
+                        let msg = &data[pos..end];
+                        if let Some(command) = parse_request(protocol, msg) {
+                            let full_command = extract_full_command(protocol, msg).unwrap_or_else(|| command.clone());
+                            *pending_w.lock().unwrap() = Some(PendingRequest {
+                                timestamp: SystemTime::now(),
+                                instant: Instant::now(),
+                                command,
+                                full_command,
+                            });
+                        }
+                    }
+                    pos = end;
+                }
             } else if let Some(command) = parse_request(protocol, data) {
                 let full_command = extract_full_command(protocol, data).unwrap_or_else(|| command.clone());
                 debug!(component = %name_req, %command);
@@ -321,8 +347,6 @@ async fn handle_conn(
                     command,
                     full_command,
                 });
-            } else if protocol == Protocol::Postgres && n > 0 {
-                info!(component = %name_req, bytes = n, first_byte = format!("0x{:02x}", data[0]), "pg client→server UNPARSED");
             }
 
             sw.write_all(data).await?;
@@ -337,6 +361,7 @@ async fn handle_conn(
         let mut http_resp_buf: Vec<u8> = Vec::with_capacity(4096);
         let mut memcached_resp_buf: Vec<u8> = Vec::with_capacity(4096);
         let mut kafka_resp_buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut pg_resp_buf: Vec<u8> = Vec::with_capacity(4096);
         let mut awaiting_response = false;
         let mut memcached_awaiting = false;
         loop {
@@ -488,17 +513,13 @@ async fn handle_conn(
                     pos = peek;
                 }
             } else if protocol == Protocol::Postgres {
-                // Postgres: only pair with meaningful responses, skip setup noise
-                let first = data[0];
-                info!(component = %name_resp, bytes = n, first_byte = format!("0x{:02x}", first),
-                    hex_head = format!("{:02x?}", &data[..n.min(20)]), "pg server→client");
-                // Use parse_postgres_response which scans all messages and prioritizes errors
-                let is_meaningful = matches!(first, b'C' | b'E' | b'T' | b'Z' | b'I' | b'D' | b'R');
-                if is_meaningful {
+                // Buffer until ReadyForQuery, then emit single event
+                pg_resp_buf.extend_from_slice(data);
+                if postgres_response_complete(&pg_resp_buf) {
                     if let Some(req) = pending_r.lock().unwrap().take() {
                         let latency = req.instant.elapsed();
-                        let response = parse_response(protocol, data).unwrap_or_default();
-                        let response_detail = format_response_detail(protocol, data).unwrap_or_else(|| response.clone());
+                        let response = parse_response(protocol, &pg_resp_buf).unwrap_or_default();
+                        let response_detail = format_response_detail(protocol, &pg_resp_buf).unwrap_or_else(|| response.clone());
                         let _ = tx_resp.send(ProxyEvent {
                             timestamp: req.timestamp,
                             component: name_resp.clone(),
@@ -509,13 +530,13 @@ async fn handle_conn(
                             response_detail,
                             latency,
                             process: process_info.clone(),
-                                    src: Some(src_resp.clone()),
-                                    dest: Some(dest_resp.clone()),
-                    system: false,
+                            src: Some(src_resp.clone()),
+                            dest: Some(dest_resp.clone()),
+                            system: false,
                         });
                     }
+                    pg_resp_buf.clear();
                 }
-                // ParameterStatus (S), BackendKeyData (K), etc. are silently skipped
             } else if protocol == Protocol::Memcached {
                 let has_pending = pending_r.lock().unwrap().is_some();
                 if has_pending || memcached_awaiting {
