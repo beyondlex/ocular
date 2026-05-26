@@ -18,5 +18,5 @@ toml_edit = "0.22"
 chrono = "0.4"
 fuzzy-matcher = "0.3"
 sqlformat = "0.2"
-ocular-proxy = { path = "../ocular-proxy", version = "0.7.0" }
-ocular-protocol = { path = "../ocular-protocol", version = "0.7.0" }
+ocular-proxy = { path = "../ocular-proxy", version = "0.8.0" }
+ocular-protocol = { path = "../ocular-protocol", version = "0.8.0" }

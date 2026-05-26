@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.8.0 (2026-05-26)
+
+### New Features
+- **Dashboard group detail page** — press `Space` on a group to open a detail view showing all proxies
+  - `j/k` navigate proxies, `n` add, `e` edit, `d` delete with confirmation
+  - Changes persist immediately to the group `.toml` file
+- **ASCII art logo** — replaces plain "Ocular" title bar on the dashboard
+
+### Improvements
+- `ProxyForm::from_entry` supports pre-filled edit forms for existing proxies
+- Status bar shows `Space` hint for group detail access
+
 ## v0.7.0 (2026-05-25)
 
 ### New Features
