@@ -63,9 +63,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y libpcap-dev
       - run: cargo publish -p ocular-protocol || true
       - run: sleep 30
       - run: cargo publish -p ocular-proxy || true
+      - run: sleep 30
+      - run: cargo publish -p ocular-capture || true
       - run: sleep 30
       - run: cargo publish -p ocular-tui || true
       - run: sleep 30
