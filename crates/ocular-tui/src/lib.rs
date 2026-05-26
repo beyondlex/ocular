@@ -218,7 +218,7 @@ impl ProxyForm {
     }
 
     fn from_entry(entry: &NewProxyEntry) -> Self {
-        let protocol_idx = PROTOCOLS.iter().position(|&p| p == &entry.protocol).unwrap_or(0);
+        let protocol_idx = PROTOCOLS.iter().position(|&p| p == entry.protocol).unwrap_or(0);
         let (lh, lp) = split_addr(&entry.listen);
         let (rh, rp) = split_addr(&entry.remote);
         Self {
