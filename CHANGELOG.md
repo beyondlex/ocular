@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.10.0 (2026-05-26)
+
+### New Features
+- **Passive capture mode** — observe traffic without changing app connections (`mode = "capture"`)
+  - macOS libpcap: supports loopback (`lo0`) and Ethernet (`en0`) interfaces
+  - TCP stream reassembly with per-connection 4-tuple tracking
+  - Buffers incomplete responses across TCP segments (e.g. large `KEYS *` results)
+  - Zero code changes, zero config changes on the application side
+- **Mode selector in proxy form** — switch between `proxy` and `capture` with ◀ ▶
+  - Capture mode shows `interface` field (placeholder: `lo0`)
+  - Proxy mode shows `listen` fields as before
+
+### Improvements
+- Config validation: reject same remote configured in both proxy and capture mode
+- Friendly error when BPF permissions are insufficient (`sudo` or `chmod g+r /dev/bpf*`)
+- Capture errors surface as system events in TUI
+
 ## v0.9.0 (2026-05-26)
 
 ### New Features
