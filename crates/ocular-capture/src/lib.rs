@@ -287,6 +287,17 @@ fn process_packet(
                         stream.request_buf.clear();
                     }
                 }
+                // MongoDB: first 4 bytes are message length (includes itself).
+                // Discard complete but unparseable messages (e.g. OP_QUERY handshake).
+                if protocol == Protocol::Mongodb && stream.request_buf.len() >= 4 {
+                    let msg_len = u32::from_le_bytes([
+                        stream.request_buf[0], stream.request_buf[1],
+                        stream.request_buf[2], stream.request_buf[3],
+                    ]) as usize;
+                    if msg_len > 0 && stream.request_buf.len() >= msg_len {
+                        stream.request_buf.drain(..msg_len);
+                    }
+                }
             }
             // If parse_request returns None, keep buffering
         }
