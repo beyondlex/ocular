@@ -39,11 +39,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools linux-libc-dev
           # Build static libpcap for musl
+          # musl package provides /lib/ld-musl-x86_64.so.1 so musl-gcc binaries can run
           wget -q https://www.tcpdump.org/release/libpcap-1.10.5.tar.xz
           tar xf libpcap-1.10.5.tar.xz
           cd libpcap-1.10.5
-          CC=musl-gcc CFLAGS="-I/usr/include -static" LDFLAGS="-static" \
-            ./configure --host=x86_64-linux-musl --prefix=/usr/local/musl --disable-shared --with-pcap=linux --without-libnl
+          CC=musl-gcc CFLAGS="-I/usr/include -I/usr/include/x86_64-linux-gnu" \
+            ./configure --prefix=/usr/local/musl --disable-shared --with-pcap=linux --without-libnl --disable-dbus
           make -j$(nproc)
           sudo make install
           echo "PCAP_LIBDIR=/usr/local/musl/lib" >> $GITHUB_ENV
