@@ -1444,8 +1444,8 @@ pub async fn run(
                     match key.code {
                         KeyCode::Char('j') => { app.focus = Focus::Detail; app.detail_scroll = 0; }
                         KeyCode::Char('k') => { app.focus = Focus::Events; }
-                        KeyCode::Char('h') => { app.focus = Focus::Components; }
-                        KeyCode::Char('l') => { app.focus = Focus::Events; }
+                        KeyCode::Char('h') if !app.preview => { app.focus = Focus::Components; }
+                        KeyCode::Char('l') if !app.preview => { app.focus = Focus::Events; }
                         KeyCode::Char('c') => { app.events.clear(); app.selected = 0; app.dirty = true; }
                         KeyCode::Char('f') => { app.follow = !app.follow; }
                         KeyCode::Char('p') => {
@@ -1457,7 +1457,7 @@ pub async fn run(
                                 app.selected = app.cached_filtered_indices.len().saturating_sub(1);
                             }
                         }
-                        KeyCode::Char(',') => {
+                        KeyCode::Char(',') if !app.preview => {
                             // Open config in $EDITOR
                             disable_raw_mode()?;
                             stdout().execute(LeaveAlternateScreen)?;
@@ -1469,8 +1469,7 @@ pub async fn run(
                             enable_raw_mode()?;
                             terminal.clear()?;
                         }
-                        KeyCode::Char('g') => {
-                            // Open group picker
+                        KeyCode::Char('g') if !app.preview => {
                             if let Some(ref gdir) = app.group_dir {
                                 let mut groups: Vec<String> = vec!["default".to_string()];
                                 if let Ok(entries) = std::fs::read_dir(gdir) {
@@ -2702,21 +2701,27 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     // Leader menu
     if app.leader_active && app.show_leader_menu {
-        let menu_lines = vec![
+        let mut menu_lines = vec![
             Line::from(Span::styled(" Space Leader Menu", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))),
             Line::from(""),
-            Line::from(vec![Span::styled(" h", Style::default().fg(Color::Cyan)), Span::raw("  → Left panel")]),
-            Line::from(vec![Span::styled(" j", Style::default().fg(Color::Cyan)), Span::raw("  → Below panel")]),
-            Line::from(vec![Span::styled(" k", Style::default().fg(Color::Cyan)), Span::raw("  → Above panel")]),
-            Line::from(vec![Span::styled(" l", Style::default().fg(Color::Cyan)), Span::raw("  → Right panel")]),
-            Line::from(vec![Span::styled(" c", Style::default().fg(Color::Cyan)), Span::raw("  → Clear all events")]),
-            Line::from(vec![Span::styled(" f", Style::default().fg(Color::Cyan)), Span::raw("  → Toggle follow (tail -f)")]),
-            Line::from(vec![Span::styled(" p", Style::default().fg(Color::Cyan)), Span::raw("  → Pause/resume stream")]),
-            Line::from(vec![Span::styled(" ,", Style::default().fg(Color::Cyan)), Span::raw("  → Edit config")]),
-            Line::from(vec![Span::styled(" g", Style::default().fg(Color::Cyan)), Span::raw("  → Switch group")]),
-            Line::from(""),
-            Line::from(Span::styled(" Esc/any  → cancel", Style::default().fg(Color::DarkGray))),
         ];
+        if !app.preview {
+            menu_lines.push(Line::from(vec![Span::styled(" h", Style::default().fg(Color::Cyan)), Span::raw("  → Left panel")]));
+        }
+        menu_lines.push(Line::from(vec![Span::styled(" j", Style::default().fg(Color::Cyan)), Span::raw("  → Below panel")]));
+        menu_lines.push(Line::from(vec![Span::styled(" k", Style::default().fg(Color::Cyan)), Span::raw("  → Above panel")]));
+        if !app.preview {
+            menu_lines.push(Line::from(vec![Span::styled(" l", Style::default().fg(Color::Cyan)), Span::raw("  → Right panel")]));
+        }
+        menu_lines.push(Line::from(vec![Span::styled(" c", Style::default().fg(Color::Cyan)), Span::raw("  → Clear all events")]));
+        menu_lines.push(Line::from(vec![Span::styled(" f", Style::default().fg(Color::Cyan)), Span::raw("  → Toggle follow (tail -f)")]));
+        menu_lines.push(Line::from(vec![Span::styled(" p", Style::default().fg(Color::Cyan)), Span::raw("  → Pause/resume stream")]));
+        if !app.preview {
+            menu_lines.push(Line::from(vec![Span::styled(" ,", Style::default().fg(Color::Cyan)), Span::raw("  → Edit config")]));
+            menu_lines.push(Line::from(vec![Span::styled(" g", Style::default().fg(Color::Cyan)), Span::raw("  → Switch group")]));
+        }
+        menu_lines.push(Line::from(""));
+        menu_lines.push(Line::from(Span::styled(" Esc/any  → cancel", Style::default().fg(Color::DarkGray))));
         let menu_height = menu_lines.len() as u16 + 2;
         let menu_width = 28;
         let area = f.area();
