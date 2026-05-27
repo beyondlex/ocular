@@ -310,7 +310,25 @@ fn process_packet(
             // If response can't be parsed, it may be incomplete — keep buffering
             let response = match parse_response(protocol, buf) {
                 Some(r) => r,
-                None => return, // incomplete, wait for more data
+                None => {
+                    tracing::debug!(
+                        component = %name,
+                        "parse_response returned None, buf={}B first_bytes={:02x?}",
+                        stream.response_buf.len(),
+                        &stream.response_buf[..stream.response_buf.len().min(16)]
+                    );
+                    // MongoDB: discard complete but unparseable response (e.g. OP_REPLY)
+                    if protocol == Protocol::Mongodb && stream.response_buf.len() >= 4 {
+                        let msg_len = u32::from_le_bytes([
+                            stream.response_buf[0], stream.response_buf[1],
+                            stream.response_buf[2], stream.response_buf[3],
+                        ]) as usize;
+                        if msg_len > 0 && stream.response_buf.len() >= msg_len {
+                            stream.response_buf.drain(..msg_len);
+                        }
+                    }
+                    return;
+                }
             };
             if let Some(pending) = stream.pending_request.take() {
                 let response_detail =
