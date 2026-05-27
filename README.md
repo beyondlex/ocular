@@ -155,6 +155,7 @@ ocular proxy postgres 10.0.0.5 -l 127.0.0.1:25432
 | `--json` | Output as JSON (one object per line) |
 | `--raw` | No ANSI colors (auto-enabled when stdout is not a TTY) |
 | `--color` | Force colored output |
+| `--tui`, `-t` | Launch minimal TUI preview (no component pane, full features) |
 | `-i`, `--interface` | Network interface for capture mode |
 | `-l`, `--listen` | Listen address for proxy mode (default: auto) |
 
