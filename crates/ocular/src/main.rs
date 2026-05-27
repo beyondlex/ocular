@@ -142,50 +142,56 @@ fn validate_config(config: &Config) -> Result<()> {
 }
 
 fn print_help() {
-    println!("ocular {} — real-time middleware traffic viewer", env!("CARGO_PKG_VERSION"));
+    use crossterm::style::{Color, SetForegroundColor, ResetColor};
+    let h = SetForegroundColor(Color::Cyan);    // headers
+    let c = SetForegroundColor(Color::Green);   // commands/examples
+    let d = SetForegroundColor(Color::DarkGrey); // descriptions
+    let r = ResetColor;
+
+    println!("{h}ocular{r} {} — real-time middleware traffic viewer", env!("CARGO_PKG_VERSION"));
     println!();
-    println!("USAGE:");
-    println!("  ocular                         Launch TUI dashboard");
-    println!("  ocular proxy <proto> [remote]   Proxy mode (terminal output)");
-    println!("  ocular capture <proto> [remote] Capture mode (terminal output)");
-    println!("  ocular --demo                   Demo mode with simulated traffic");
+    println!("{h}USAGE:{r}");
+    println!("  {c}ocular{r}                         Launch TUI dashboard");
+    println!("  {c}ocular proxy{r} <proto> [remote]   Proxy mode (terminal output)");
+    println!("  {c}ocular capture{r} <proto> [remote] Capture mode (terminal output)");
+    println!("  {c}ocular --demo{r}                   Demo mode with simulated traffic");
     println!();
-    println!("SUBCOMMANDS:");
-    println!("  proxy    Start a TCP proxy and print events to terminal");
-    println!("  capture  Passively capture traffic (requires BPF permissions)");
-    println!("  cap      Alias for capture");
+    println!("{h}SUBCOMMANDS:{r}");
+    println!("  {c}proxy{r}    Start a TCP proxy and print events to terminal");
+    println!("  {c}capture{r}  Passively capture traffic (requires BPF permissions)");
+    println!("  {c}cap{r}      Alias for capture");
     println!();
-    println!("ARGUMENTS:");
-    println!("  <proto>   Protocol: redis, mysql, postgres, amqp, mongodb, http, memcached, kafka");
-    println!("  [remote]  Target host[:port] (default: 127.0.0.1 with protocol's default port)");
+    println!("{h}ARGUMENTS:{r}");
+    println!("  {c}<proto>{r}   Protocol: redis, mysql, postgres, amqp, mongodb, http, memcached, kafka");
+    println!("  {c}[remote]{r}  Target host[:port] (default: 127.0.0.1 with protocol's default port)");
     println!();
-    println!("OPTIONS:");
-    println!("  --json           Output as JSON (one object per line)");
-    println!("  --raw            No ANSI colors (auto-enabled when piped)");
-    println!("  --color          Force colored output");
-    println!("  -i, --interface  Network interface for capture mode");
-    println!("  -l, --listen     Listen address for proxy mode");
-    println!("  -v, --version    Print version");
-    println!("  -h, --help       Print this help");
+    println!("{h}OPTIONS:{r}");
+    println!("  {c}--json{r}           Output as JSON (one object per line)");
+    println!("  {c}--raw{r}            No ANSI colors (auto-enabled when piped)");
+    println!("  {c}--color{r}          Force colored output");
+    println!("  {c}-i, --interface{r}  Network interface for capture mode");
+    println!("  {c}-l, --listen{r}     Listen address for proxy mode");
+    println!("  {c}-v, --version{r}    Print version");
+    println!("  {c}-h, --help{r}       Print this help");
     println!();
-    println!("SHORTHAND EXAMPLES:");
-    println!("  ocular proxy redis              → proxy redis 127.0.0.1:6379, listen 127.0.0.1:16379");
-    println!("  ocular proxy mysql 10.0.0.5     → proxy mysql 10.0.0.5:3306, listen 127.0.0.1:13306");
-    println!("  ocular cap mysql 10.0.0.5       → capture mysql 10.0.0.5:3306 on en0 (auto-detected)");
+    println!("{h}SHORTHAND EXAMPLES:{r}");
+    println!("  {c}ocular proxy redis{r}              {d}→ proxy redis 127.0.0.1:6379, listen 127.0.0.1:16379{r}");
+    println!("  {c}ocular proxy mysql 10.0.0.5{r}     {d}→ proxy mysql 10.0.0.5:3306, listen 127.0.0.1:13306{r}");
+    println!("  {c}ocular cap mysql 10.0.0.5{r}       {d}→ capture mysql 10.0.0.5:3306 on en0 (auto-detected){r}");
     println!();
-    println!("PORT AUTO-ASSIGNMENT (proxy mode):");
+    println!("{h}PORT AUTO-ASSIGNMENT (proxy mode):{r}");
     println!("  Listen port = remote port + 10000 (e.g. 3306 → 13306, 6379 → 16379)");
     println!("  If the port is occupied, a random available port is used instead.");
-    println!("  Override with -l: ocular proxy mysql -l 127.0.0.1:23306");
+    println!("  Override with {c}-l{r}: {c}ocular proxy mysql -l 127.0.0.1:23306{r}");
     println!();
-    println!("INTERFACE AUTO-DETECTION (capture mode):");
+    println!("{h}INTERFACE AUTO-DETECTION (capture mode):{r}");
     println!("  Remote is 127.x/localhost → loopback (lo0 on macOS, lo on Linux)");
     println!("  Remote is non-local       → default NIC (en0 on macOS, default route on Linux)");
-    println!("  Override with -i: sudo ocular cap mysql 10.0.0.5 -i en1");
+    println!("  Override with {c}-i{r}: {c}sudo ocular cap mysql 10.0.0.5 -i en1{r}");
     println!();
-    println!("DEFAULT PORTS:");
-    println!("  redis=6379  mysql=3306  postgres=5432  amqp=5672");
-    println!("  mongodb=27017  http=9200  memcached=11211  kafka=9092");
+    println!("{h}DEFAULT PORTS:{r}");
+    println!("  redis={c}6379{r}  mysql={c}3306{r}  postgres={c}5432{r}  amqp={c}5672{r}");
+    println!("  mongodb={c}27017{r}  http={c}9200{r}  memcached={c}11211{r}  kafka={c}9092{r}");
 }
 
 fn init_tracing(log_dir: &std::path::Path) {
