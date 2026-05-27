@@ -40,7 +40,8 @@ jobs:
           cat > Cross.toml << 'EOF'
           [target.x86_64-unknown-linux-musl]
           pre-build = [
-            "apt-get update && apt-get install --assume-yes flex bison wget linux-libc-dev",
+            "apt-get update && apt-get install --assume-yes flex bison wget linux-libc-dev musl-tools",
+            "mkdir -p /usr/local/musl/include /usr/local/musl/lib",
             "cp -r /usr/include/linux /usr/local/musl/include/",
             "cp -r /usr/include/x86_64-linux-gnu/asm /usr/local/musl/include/",
             "cp -r /usr/include/asm-generic /usr/local/musl/include/",
@@ -49,9 +50,9 @@ jobs:
             "cd /tmp/libpcap-1.10.5 && CC=musl-gcc ./configure --host=x86_64-linux-musl --prefix=/usr/local/musl --disable-shared --with-pcap=linux --without-libnl --disable-dbus && make -j$(nproc) && make install"
           ]
           [target.x86_64-unknown-linux-musl.env]
-          passthrough = ["PCAP_LIBDIR"]
+          passthrough = ["LIBPCAP_LIBDIR"]
           EOF
-          PCAP_LIBDIR=/usr/local/musl/lib cross build --release --target ${{ matrix.target }} ${{ matrix.features }}
+          LIBPCAP_LIBDIR=/usr/local/musl/lib cross build --release --target ${{ matrix.target }} ${{ matrix.features }}
       - name: Build (macOS)
         if: ${{ !matrix.use_cross }}
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.features }}
