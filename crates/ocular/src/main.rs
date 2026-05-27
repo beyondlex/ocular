@@ -297,7 +297,7 @@ fn spawn_proxy(
             let capture_cfg = ocular_capture::CaptureConfig {
                 name: cfg.name.clone(),
                 protocol,
-                interface: cfg.interface.clone().unwrap_or_else(|| if cfg!(target_os = "macos") { "lo0" } else { "lo" }.to_string()),
+                interface: cfg.interface.clone().filter(|s| !s.is_empty()).unwrap_or_else(|| if cfg!(target_os = "macos") { "lo0" } else { "lo" }.to_string()),
                 remote: cfg.remote.clone(),
             };
             let name = cfg.name.clone();
