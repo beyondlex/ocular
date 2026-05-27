@@ -355,7 +355,7 @@ async fn main() -> Result<()> {
         let theme = ocular_tui::Theme::by_name("tokyo-night-storm");
         let config_path = PathBuf::from("ocular.toml");
         let demo_status: ocular_proxy::StatusMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        return ocular_tui::run(rx, components, theme, config_path.clone(), None, true, false, None, None, None, None, config_path, demo_status).await;
+        return ocular_tui::run(rx, components, theme, config_path.clone(), None, true, false, None, None, None, None, config_path, demo_status, false).await;
     }
 
     // CLI subcommands: capture/cap/proxy — skip TUI, output to terminal
@@ -543,5 +543,5 @@ async fn main() -> Result<()> {
         base_theme
     };
 
-    ocular_tui::run(rx, components, theme, active_config_path, config.event_format, config.leader_menu, config.quit_confirm, Some(proxy_change_rx), Some(group_dir), active_group, Some(proxy_change_tx), config_path, status_map).await
+    ocular_tui::run(rx, components, theme, active_config_path, config.event_format, config.leader_menu, config.quit_confirm, Some(proxy_change_rx), Some(group_dir), active_group, Some(proxy_change_tx), config_path, status_map, false).await
 }

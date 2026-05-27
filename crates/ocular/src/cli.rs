@@ -291,7 +291,11 @@ pub async fn run_cli(args: CliArgs) -> Result<()> {
             include: None,
         };
         let theme = ocular_tui::Theme::by_name("default");
-        let result = ocular_tui::run_preview(rx, component, theme, status).await;
+        let config_path = std::path::PathBuf::from("ocular.toml");
+        let result = ocular_tui::run(
+            rx, vec![component], theme, config_path.clone(),
+            None, true, false, None, None, None, None, config_path, status, true,
+        ).await;
         let _ = shutdown_tx.send(true);
         return result;
     }

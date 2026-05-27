@@ -428,6 +428,7 @@ struct App {
     /// Cache key: (events.len, filter, component_idx, fuzzy_filter)
     /// None = cache needs recompute
     cached_filter_key: Option<(usize, String, Option<usize>, bool)>,
+    preview: bool,
 }
 
 fn filtered_component_indices(app: &App) -> Vec<usize> {
@@ -638,6 +639,7 @@ pub async fn run(
     proxy_change_tx: Option<broadcast::Sender<ProxyChange>>,
     main_config_path: PathBuf,
     status_map: StatusMap,
+    preview: bool,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -656,7 +658,7 @@ pub async fn run(
         selected: 0,
         detail_scroll: 0,
         focus: Focus::Events,
-        components: Vec::new(), // empty — populated when user selects a group
+        components: if preview { components.clone() } else { Vec::new() }, // preview: pre-populate; normal: wait for group selection
         component_idx: None,
         filter: String::new(),
         pending_keys: String::new(),
@@ -684,7 +686,7 @@ pub async fn run(
         active_group,
         group_picker: None,
         proxy_change_tx,
-        mode: AppMode::Dashboard,
+        mode: if preview { AppMode::Main } else { AppMode::Dashboard },
         dashboard: DashboardState::load(
             app_group_dir.as_deref().unwrap_or(std::path::Path::new("")),
             &main_config_path,
@@ -696,6 +698,7 @@ pub async fn run(
         dirty: true,
         cached_filtered_indices: Vec::new(),
         cached_filter_key: None,
+        preview,
     };
 
     let mut last_mtime = SystemTime::UNIX_EPOCH;
@@ -1494,7 +1497,9 @@ pub async fn run(
 
                 match key.code {
                     KeyCode::Char('q') => {
-                        if app.quit_confirm_enabled { app.confirm_quit = true; } else {
+                        if preview {
+                            break;
+                        } else if app.quit_confirm_enabled { app.confirm_quit = true; } else {
                             // Stop all proxies before returning to dashboard
                             if let Some(ref tx) = app.proxy_change_tx {
                                 let _ = tx.send(ProxyChange::StopAll);
@@ -2255,7 +2260,11 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Horizontal)
-        .constraints([Constraint::Length(28), Constraint::Min(0)])
+        .constraints(if app.preview {
+            [Constraint::Length(0), Constraint::Min(0)]
+        } else {
+            [Constraint::Length(28), Constraint::Min(0)]
+        })
         .split(outer[0]);
 
     // Left: component list
@@ -3279,192 +3288,4 @@ fn delete_proxy_from_config(config_path: &std::path::Path, name: &str) {
     }
 
     let _ = std::fs::write(config_path, doc.to_string());
-}
-
-/// Minimal TUI preview for CLI subcommands (no component pane, q/ctrl+c exits directly).
-pub async fn run_preview(
-    mut rx: broadcast::Receiver<ProxyEvent>,
-    _component: ComponentInfo,
-    theme: Theme,
-    _status: StatusMap,
-) -> Result<()> {
-    enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
-
-    let mut events: Vec<ProxyEvent> = Vec::new();
-    let mut selected: usize = 0;
-    let mut detail_scroll: usize = 0;
-    let mut follow = true;
-    let mut filter = String::new();
-    let mut filter_active = false;
-
-    loop {
-        // Collect new events
-        while let Ok(ev) = rx.try_recv() {
-            if !ev.system {
-                events.push(ev);
-                if follow { selected = events.len().saturating_sub(1); }
-            }
-        }
-
-        // Filter events
-        let filtered_indices: Vec<usize> = if filter.is_empty() {
-            (0..events.len()).collect()
-        } else {
-            let matcher = SkimMatcherV2::default();
-            let lower_filter = filter.to_lowercase();
-            events.iter().enumerate().filter_map(|(i, ev)| {
-                if matcher.fuzzy_match(&ev.command.to_lowercase(), &lower_filter).is_some()
-                    || matcher.fuzzy_match(&ev.component.to_lowercase(), &lower_filter).is_some() {
-                    Some(i)
-                } else {
-                    None
-                }
-            }).collect()
-        };
-
-        // Draw
-        terminal.draw(|f| {
-            let chunks = Layout::default()
-                .direction(ratatui::layout::Direction::Vertical)
-                .constraints([Constraint::Min(0), Constraint::Length(1)])
-                .split(f.area());
-
-            let main = Layout::default()
-                .direction(ratatui::layout::Direction::Horizontal)
-                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(chunks[0]);
-
-            // Events list
-            let visible_height = main[0].height.saturating_sub(2) as usize;
-            let visible_start = if selected >= visible_height {
-                selected - visible_height + 1
-            } else {
-                0
-            };
-
-            let event_items: Vec<ListItem> = filtered_indices.iter()
-                .enumerate()
-                .skip(visible_start)
-                .take(visible_height)
-                .map(|(idx, &orig_idx)| {
-                    let ev = &events[orig_idx];
-                    let time = format_time(&ev.timestamp);
-                    let lat = format_latency(&ev.latency);
-                    let line = format!("{} [{}] {} ({})", time, ev.component, ev.command, lat);
-                    let style = if idx == selected {
-                        theme.selected
-                    } else {
-                        Style::default().fg(theme.command.fg.unwrap_or(Color::White))
-                    };
-                    ListItem::new(Span::styled(line, style))
-                })
-                .collect();
-
-            let events_block = Block::default()
-                .borders(Borders::ALL)
-                .title(if filter_active {
-                    format!(" Events [/{}] ", filter)
-                } else {
-                    format!(" Events ({}) ", filtered_indices.len())
-                });
-            let events_list = List::new(event_items).block(events_block);
-            f.render_widget(events_list, main[0]);
-
-            // Detail pane
-            let detail_text = if let Some(&orig_idx) = filtered_indices.get(selected) {
-                let ev = &events[orig_idx];
-                let mut lines = Vec::new();
-                lines.push(format!("Command: {}", ev.full_command));
-                if !ev.response_detail.is_empty() {
-                    lines.push(String::new());
-                    lines.push(format!("Response: {}", ev.response_detail));
-                }
-                if let Some(ref src) = ev.src {
-                    lines.push(format!("Source: {}", src));
-                }
-                if let Some(ref dest) = ev.dest {
-                    lines.push(format!("Dest: {}", dest));
-                }
-                lines.push(format!("Latency: {}", format_latency(&ev.latency)));
-                lines.join("\n")
-            } else {
-                String::new()
-            };
-
-            let detail_block = Block::default()
-                .borders(Borders::ALL)
-                .title(" Detail ");
-            let detail = Paragraph::new(detail_text)
-                .block(detail_block)
-                .wrap(Wrap { trim: false })
-                .scroll((detail_scroll as u16, 0));
-            f.render_widget(detail, main[1]);
-
-            // Status bar
-            let status_text = if follow { " FOLLOW " } else { " PAUSED " };
-            let bar = Paragraph::new(Span::styled(
-                format!(" q:quit  /:filter  j/k:nav  f:follow {}  {} events", status_text, events.len()),
-                Style::default().fg(Color::DarkGray),
-            ));
-            f.render_widget(bar, chunks[1]);
-        })?;
-
-        // Handle input
-        if event::poll(Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press { continue; }
-
-                if key.code == KeyCode::Char('c') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                    break;
-                }
-
-                if filter_active {
-                    match key.code {
-                        KeyCode::Esc => { filter.clear(); filter_active = false; }
-                        KeyCode::Enter => { filter_active = false; }
-                        KeyCode::Backspace => { filter.pop(); }
-                        KeyCode::Char(c) => { filter.push(c); }
-                        _ => {}
-                    }
-                    continue;
-                }
-
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        if selected + 1 < filtered_indices.len() {
-                            selected += 1;
-                            detail_scroll = 0;
-                            follow = false;
-                        }
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        selected = selected.saturating_sub(1);
-                        detail_scroll = 0;
-                        follow = false;
-                    }
-                    KeyCode::Char('G') => {
-                        selected = filtered_indices.len().saturating_sub(1);
-                        follow = true;
-                    }
-                    KeyCode::Char('g') => {
-                        selected = 0;
-                        follow = false;
-                    }
-                    KeyCode::Char('f') => { follow = !follow; }
-                    KeyCode::Char('/') => { filter_active = true; }
-                    KeyCode::Esc => { filter.clear(); }
-                    KeyCode::Char('d') => { detail_scroll += 3; }
-                    KeyCode::Char('u') => { detail_scroll = detail_scroll.saturating_sub(3); }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
-    Ok(())
 }
