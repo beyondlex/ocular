@@ -1,4 +1,4 @@
-use crate::ProxyEvent;
+use crate::{Direction, ProxyEvent};
 
 /// Trait that each protocol implements for parsing and display.
 pub trait ProtocolHandler: Send + Sync {
@@ -37,4 +37,31 @@ pub trait ProtocolHandler: Send + Sync {
 
     /// Is this a frame-based protocol with custom proxy logic? (AMQP)
     fn is_frame_based(&self) -> bool { false }
+
+    // ─── Capture mode support ───────────────────────────────────────────────
+
+    /// Length of the first complete message in buf (for discarding unparseable messages).
+    /// The length should include any header bytes (i.e., total bytes to drain).
+    /// Returns None if the protocol doesn't have self-describing message boundaries.
+    fn message_length(&self, _buf: &[u8]) -> Option<usize> { None }
+
+    /// In capture mode, should this packet be skipped? (e.g., connection handshake)
+    /// `handshake_done` is false until this method returns `HandshakeAction::Done`.
+    fn capture_handshake(&self, _payload: &[u8], _direction: Direction) -> HandshakeAction {
+        HandshakeAction::Done
+    }
+
+    /// Default port for this protocol.
+    fn default_port(&self) -> u16 { 0 }
+}
+
+/// Action to take during capture handshake phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeAction {
+    /// Handshake is complete (or protocol has no handshake). Process normally.
+    Done,
+    /// Skip this packet (still in handshake phase).
+    Skip,
+    /// Handshake just completed with this packet. Skip it but mark as done.
+    Complete,
 }

@@ -107,16 +107,7 @@ fn print_usage(subcmd: &str) {
 }
 
 fn default_port(protocol: Protocol) -> u16 {
-    match protocol {
-        Protocol::Redis => 6379,
-        Protocol::Mysql => 3306,
-        Protocol::Postgres => 5432,
-        Protocol::Amqp => 5672,
-        Protocol::Mongodb => 27017,
-        Protocol::Http => 9200,
-        Protocol::Memcached => 11211,
-        Protocol::Kafka => 9092,
-    }
+    ocular_protocol::get_handler(protocol).default_port()
 }
 
 fn detect_interface(remote: &str) -> String {

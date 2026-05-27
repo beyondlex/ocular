@@ -201,60 +201,32 @@ fn process_packet(
 
     let stream = streams.entry(conn_key).or_insert_with(|| {
         let mut s = TcpStreamState::new();
-        if protocol == Protocol::Mysql {
-            s.handshake_done = false;
-        }
+        s.handshake_done = false;
         s
     });
 
-    // MySQL: skip handshake phase packets.
-    // Handshake may involve multiple rounds (e.g. caching_sha2_password):
-    //   Server Greeting (seq=0, marker=0x0a) → Client Login (seq=1) →
-    //   AuthSwitch (seq=2, 0xfe) → Client Auth (seq=3) → OK (seq=4, 0x00)
-    // We detect handshake completion when server sends OK (0x00) with seq>0.
-    // For mid-stream connections (missed handshake), a request with seq=0 is a real command.
-    if protocol == Protocol::Mysql && !stream.handshake_done {
-        if payload.len() >= 5 {
-            let seq = payload[3];
-            let marker = payload[4];
-            tracing::debug!(
-                component = %name,
-                "mysql handshake: dir={:?} seq={} marker=0x{:02x} payload={}B",
-                direction, seq, marker, payload.len()
-            );
-            match direction {
-                Direction::Request if seq == 0 => {
-                    // seq=0 request = real command (missed handshake)
-                    stream.handshake_done = true;
-                    tracing::debug!(component = %name, "mysql handshake skipped (mid-stream connection)");
-                    // fall through to normal processing below
-                }
-                Direction::Response if seq == 0 && marker == 10 => {
-                    // Server greeting
-                    return;
-                }
-                Direction::Response if marker == 0x00 => {
-                    // OK packet — auth success, handshake complete
-                    stream.handshake_done = true;
-                    tracing::debug!(component = %name, "mysql handshake done (OK at seq={})", seq);
-                    return;
-                }
-                _ => {
-                    // All other handshake packets: login, AuthSwitchRequest (0xfe),
-                    // AuthMoreData (0x01), ERR (0xff), client auth responses
-                    return;
-                }
+    // Protocol handshake detection (generic via trait)
+    if !stream.handshake_done {
+        let action = handler.capture_handshake(payload, direction);
+        match action {
+            ocular_protocol::HandshakeAction::Done => {
+                // Real command on a connection whose handshake we missed, or no handshake
+                stream.handshake_done = true;
+                tracing::debug!(component = %name, "handshake skipped (mid-stream)");
+                // fall through to normal processing
             }
-        } else {
-            tracing::debug!(component = %name, "mysql handshake: payload too short ({}B)", payload.len());
-            return;
+            ocular_protocol::HandshakeAction::Skip => return,
+            ocular_protocol::HandshakeAction::Complete => {
+                stream.handshake_done = true;
+                tracing::debug!(component = %name, "handshake done");
+                return;
+            }
         }
     }
 
     match direction {
         Direction::Request => {
             stream.push_request(payload);
-            // Try to parse complete request
             if handler.needs_request_buffering() && !handler.request_complete(&stream.request_buf) {
                 return;
             }
@@ -277,24 +249,9 @@ fn process_packet(
                     stream.request_buf.len(),
                     &stream.request_buf[..stream.request_buf.len().min(16)]
                 );
-                // MySQL: if buffer contains a complete packet that we can't parse
-                // (e.g. COM_FIELD_LIST), discard it to avoid polluting future commands.
-                if protocol == Protocol::Mysql && stream.request_buf.len() >= 4 {
-                    let pkt_len = (stream.request_buf[0] as usize)
-                        | (stream.request_buf[1] as usize) << 8
-                        | (stream.request_buf[2] as usize) << 16;
-                    if stream.request_buf.len() >= 4 + pkt_len {
-                        stream.request_buf.clear();
-                    }
-                }
-                // MongoDB: first 4 bytes are message length (includes itself).
-                // Discard complete but unparseable messages (e.g. OP_QUERY handshake).
-                if protocol == Protocol::Mongodb && stream.request_buf.len() >= 4 {
-                    let msg_len = u32::from_le_bytes([
-                        stream.request_buf[0], stream.request_buf[1],
-                        stream.request_buf[2], stream.request_buf[3],
-                    ]) as usize;
-                    if msg_len > 0 && stream.request_buf.len() >= msg_len {
+                // Discard complete but unparseable messages via trait
+                if let Some(msg_len) = handler.message_length(&stream.request_buf) {
+                    if stream.request_buf.len() >= msg_len {
                         stream.request_buf.drain(..msg_len);
                     }
                 }
@@ -317,13 +274,9 @@ fn process_packet(
                         stream.response_buf.len(),
                         &stream.response_buf[..stream.response_buf.len().min(16)]
                     );
-                    // MongoDB: discard complete but unparseable response (e.g. OP_REPLY)
-                    if protocol == Protocol::Mongodb && stream.response_buf.len() >= 4 {
-                        let msg_len = u32::from_le_bytes([
-                            stream.response_buf[0], stream.response_buf[1],
-                            stream.response_buf[2], stream.response_buf[3],
-                        ]) as usize;
-                        if msg_len > 0 && stream.response_buf.len() >= msg_len {
+                    // Discard complete but unparseable messages via trait
+                    if let Some(msg_len) = handler.message_length(&stream.response_buf) {
+                        if stream.response_buf.len() >= msg_len {
                             stream.response_buf.drain(..msg_len);
                         }
                     }

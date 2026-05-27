@@ -1,5 +1,5 @@
-use crate::handler::ProtocolHandler;
-use crate::ProxyEvent;
+use crate::handler::{HandshakeAction, ProtocolHandler};
+use crate::{Direction, ProxyEvent};
 
 // ─── Redis ──────────────────────────────────────────────────────────────────
 
@@ -12,9 +12,16 @@ impl ProtocolHandler for RedisHandler {
     fn parse_response(&self, buf: &[u8]) -> Option<String> {
         crate::parse_resp(buf).ok().flatten().map(|(val, _)| val.to_command_string())
     }
+    fn default_port(&self) -> u16 { 6379 }
 }
 
 // ─── MySQL ──────────────────────────────────────────────────────────────────
+
+const MYSQL_HEADER_LEN: usize = 4; // 3-byte length + 1-byte sequence
+const MYSQL_COM_QUERY: u8 = 0x03;
+const MYSQL_COM_STMT_PREPARE: u8 = 0x16;
+const MYSQL_GREETING_PROTOCOL_VERSION: u8 = 10;
+const MYSQL_OK_MARKER: u8 = 0x00;
 
 pub struct MysqlHandler;
 
@@ -25,10 +32,10 @@ impl ProtocolHandler for MysqlHandler {
     fn extract_full_command(&self, buf: &[u8]) -> Option<String> {
         if buf.len() < 5 { return None; }
         let payload_len = (buf[0] as usize) | (buf[1] as usize) << 8 | (buf[2] as usize) << 16;
-        if buf.len() < 4 + payload_len || payload_len <= 1 { return None; }
+        if buf.len() < MYSQL_HEADER_LEN + payload_len || payload_len <= 1 { return None; }
         let cmd = buf[4];
-        if cmd == 0x03 || cmd == 0x16 {
-            let sql = String::from_utf8_lossy(&buf[5..4 + payload_len]);
+        if cmd == MYSQL_COM_QUERY || cmd == MYSQL_COM_STMT_PREPARE {
+            let sql = String::from_utf8_lossy(&buf[5..MYSQL_HEADER_LEN + payload_len]);
             Some(sql.replace(|c: char| c.is_control(), ""))
         } else {
             self.parse_request(buf)
@@ -44,6 +51,23 @@ impl ProtocolHandler for MysqlHandler {
     fn response_complete(&self, buf: &[u8]) -> bool {
         crate::mysql::mysql_response_complete(buf)
     }
+    fn message_length(&self, buf: &[u8]) -> Option<usize> {
+        if buf.len() < MYSQL_HEADER_LEN { return None; }
+        let pkt_len = (buf[0] as usize) | (buf[1] as usize) << 8 | (buf[2] as usize) << 16;
+        Some(MYSQL_HEADER_LEN + pkt_len)
+    }
+    fn capture_handshake(&self, payload: &[u8], direction: Direction) -> HandshakeAction {
+        if payload.len() < 5 { return HandshakeAction::Skip; }
+        let seq = payload[3];
+        let marker = payload[4];
+        match direction {
+            Direction::Request if seq == 0 => HandshakeAction::Done, // real command
+            Direction::Response if seq == 0 && marker == MYSQL_GREETING_PROTOCOL_VERSION => HandshakeAction::Skip,
+            Direction::Response if marker == MYSQL_OK_MARKER => HandshakeAction::Complete,
+            _ => HandshakeAction::Skip, // auth exchange
+        }
+    }
+    fn default_port(&self) -> u16 { 3306 }
 }
 
 // ─── PostgreSQL ─────────────────────────────────────────────────────────────
@@ -67,6 +91,7 @@ impl ProtocolHandler for PostgresHandler {
     fn response_complete(&self, buf: &[u8]) -> bool {
         crate::postgres::postgres_response_complete(buf)
     }
+    fn default_port(&self) -> u16 { 5432 }
 }
 
 // ─── AMQP ───────────────────────────────────────────────────────────────────
@@ -84,6 +109,7 @@ impl ProtocolHandler for AmqpHandler {
         crate::amqp::format_amqp_response_detail(buf)
     }
     fn is_frame_based(&self) -> bool { true }
+    fn default_port(&self) -> u16 { 5672 }
 }
 
 // ─── MongoDB ────────────────────────────────────────────────────────────────
@@ -103,6 +129,12 @@ impl ProtocolHandler for MongodbHandler {
     fn format_response_detail(&self, buf: &[u8]) -> Option<String> {
         crate::mongodb::format_mongo_response_detail(buf)
     }
+    fn message_length(&self, buf: &[u8]) -> Option<usize> {
+        if buf.len() < 4 { return None; }
+        let len = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+        if len > 0 { Some(len) } else { None }
+    }
+    fn default_port(&self) -> u16 { 27017 }
 }
 
 // ─── HTTP ───────────────────────────────────────────────────────────────────
@@ -155,6 +187,7 @@ impl ProtocolHandler for HttpHandler {
     fn response_complete(&self, buf: &[u8]) -> bool {
         crate::http::http_response_complete(buf)
     }
+    fn default_port(&self) -> u16 { 9200 }
 }
 
 // ─── Memcached ──────────────────────────────────────────────────────────────
@@ -179,6 +212,7 @@ impl ProtocolHandler for MemcachedHandler {
     fn response_complete(&self, buf: &[u8]) -> bool {
         crate::memcached::memcached_response_complete(buf)
     }
+    fn default_port(&self) -> u16 { 11211 }
 }
 
 // ─── Kafka ──────────────────────────────────────────────────────────────────
@@ -206,4 +240,5 @@ impl ProtocolHandler for KafkaHandler {
     fn response_complete(&self, buf: &[u8]) -> bool {
         crate::kafka::kafka_frame_complete(buf)
     }
+    fn default_port(&self) -> u16 { 9092 }
 }

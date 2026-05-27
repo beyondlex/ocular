@@ -25,11 +25,7 @@ impl ConnKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Direction {
-    Request,
-    Response,
-}
+pub use ocular_protocol::Direction;
 
 pub struct TcpStreamState {
     pub request_buf: Vec<u8>,
@@ -45,7 +41,7 @@ impl TcpStreamState {
             request_buf: Vec::with_capacity(4096),
             response_buf: Vec::with_capacity(4096),
             pending_request: None,
-            handshake_done: true, // default true for non-MySQL protocols
+            handshake_done: false,
         }
     }
 
