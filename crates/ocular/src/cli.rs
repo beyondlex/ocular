@@ -223,6 +223,14 @@ fn format_event_json(ev: &ProxyEvent, out: &mut impl Write) {
 }
 
 pub async fn run_cli(args: CliArgs) -> Result<()> {
+    // Init tracing to stderr if RUST_LOG is set
+    if std::env::var("RUST_LOG").is_ok() {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .init();
+    }
     let (tx, _) = broadcast::channel::<ProxyEvent>(4096);
     let status: StatusMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
