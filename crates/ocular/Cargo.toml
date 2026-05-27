@@ -24,10 +24,10 @@ tracing-appender.workspace = true
 dirs = "5"
 chrono.workspace = true
 crossterm.workspace = true
-ocular-proxy = { path = "../ocular-proxy", version = "0.11.1" }
-ocular-tui = { path = "../ocular-tui", version = "0.11.1" }
-ocular-protocol = { path = "../ocular-protocol", version = "0.11.1" }
-ocular-capture = { path = "../ocular-capture", version = "0.11.1", optional = true }
+ocular-proxy = { path = "../ocular-proxy", version = "0.11.2" }
+ocular-tui = { path = "../ocular-tui", version = "0.11.2" }
+ocular-protocol = { path = "../ocular-protocol", version = "0.11.2" }
+ocular-capture = { path = "../ocular-capture", version = "0.11.2", optional = true }
 
 [features]
 default = ["capture"]
