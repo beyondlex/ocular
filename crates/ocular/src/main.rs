@@ -169,6 +169,7 @@ fn print_help() {
     println!("  {c}--json{r}           Output as JSON (one object per line)");
     println!("  {c}--raw{r}            No ANSI colors (auto-enabled when piped)");
     println!("  {c}--color{r}          Force colored output");
+    println!("  {c}--tui, -t{r}        Launch minimal TUI preview");
     println!("  {c}-i, --interface{r}  Network interface for capture mode");
     println!("  {c}-l, --listen{r}     Listen address for proxy mode");
     println!("  {c}-v, --version{r}    Print version");

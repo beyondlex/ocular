@@ -27,6 +27,7 @@ pub struct CliArgs {
     pub output: OutputMode,
     pub interface: Option<String>,
     pub listen: Option<String>,
+    pub tui: bool,
 }
 
 pub fn parse_cli_args(args: &[String]) -> Result<CliArgs> {
@@ -63,6 +64,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliArgs> {
     };
     let mut interface = None;
     let mut listen = None;
+    let mut tui = false;
 
     let mut i = extra_start;
     while i < args.len() {
@@ -70,6 +72,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliArgs> {
             "--json" => output = OutputMode::Json,
             "--raw" => output = OutputMode::Raw,
             "--color" => output = OutputMode::Color,
+            "--tui" | "-t" => tui = true,
             "-i" | "--interface" => {
                 i += 1;
                 interface = Some(args.get(i).cloned().ok_or_else(|| anyhow::anyhow!("--interface requires a value"))?);
@@ -83,7 +86,7 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliArgs> {
         i += 1;
     }
 
-    Ok(CliArgs { subcmd, protocol, remote, output, interface, listen })
+    Ok(CliArgs { subcmd, protocol, remote, output, interface, listen, tui })
 }
 
 fn print_usage(subcmd: &str) {
@@ -95,6 +98,7 @@ fn print_usage(subcmd: &str) {
     eprintln!("  --json              Output as JSON (one object per line)");
     eprintln!("  --raw               Output without colors");
     eprintln!("  --color             Force colored output");
+    eprintln!("  --tui, -t           Launch minimal TUI preview");
     eprintln!("  -i, --interface     Network interface (capture mode)");
     eprintln!("  -l, --listen        Listen address (proxy mode, default: auto)");
     eprintln!();
@@ -227,10 +231,12 @@ pub async fn run_cli(args: CliArgs) -> Result<()> {
 
     match args.subcmd {
         CliSubcommand::Capture => {
-            let interface = args.interface.unwrap_or_else(|| detect_interface(&args.remote));
-            eprintln!("Capturing {:?} on {} (filter: tcp port {})",
-                args.protocol, interface,
-                args.remote.rsplit(':').next().unwrap_or("?"));
+            let interface = args.interface.clone().unwrap_or_else(|| detect_interface(&args.remote));
+            if !args.tui {
+                eprintln!("Capturing {:?} on {} (filter: tcp port {})",
+                    args.protocol, interface,
+                    args.remote.rsplit(':').next().unwrap_or("?"));
+            }
 
             #[cfg(feature = "capture")]
             {
@@ -253,24 +259,41 @@ pub async fn run_cli(args: CliArgs) -> Result<()> {
         }
         CliSubcommand::Proxy => {
             let listen = match args.listen {
-                Some(l) => l,
+                Some(ref l) => l.clone(),
                 None => resolve_listen_addr(&args.remote)?,
             };
-            eprintln!("Proxying {:?} on {} → {}", args.protocol, listen, args.remote);
+            if !args.tui {
+                eprintln!("Proxying {:?} on {} → {}", args.protocol, listen, args.remote);
+            }
 
             let listen_clone = listen.clone();
             let remote = args.remote.clone();
             let tx_clone = tx.clone();
             let status_clone = status.clone();
             let name_clone = name.clone();
+            let protocol = args.protocol;
             tokio::spawn(async move {
                 if let Err(e) = ocular_proxy::run_proxy(
-                    listen_clone, remote, name_clone, args.protocol, tx_clone, shutdown_rx, status_clone,
+                    listen_clone, remote, name_clone, protocol, tx_clone, shutdown_rx, status_clone,
                 ).await {
                     eprintln!("proxy error: {}", e);
                 }
             });
         }
+    }
+
+    if args.tui {
+        let rx = tx.subscribe();
+        let component = ocular_tui::ComponentInfo {
+            name: name.clone(),
+            listen: String::new(),
+            exclude: None,
+            include: None,
+        };
+        let theme = ocular_tui::Theme::by_name("default");
+        let result = ocular_tui::run_preview(rx, component, theme, status).await;
+        let _ = shutdown_tx.send(true);
+        return result;
     }
 
     let mut rx = tx.subscribe();
