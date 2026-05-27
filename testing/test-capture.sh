@@ -41,15 +41,14 @@ for i in $(seq 1 $LOOPS); do
   " > /dev/null 2>&1
 
   # RabbitMQ (AMQP, default guest/guest)
-  # Publish a message using amqp-publish if available, otherwise curl management API
-  if command -v amqp-publish &> /dev/null; then
-    amqp-publish --url="amqp://guest:guest@127.0.0.1:5672" --exchange="" --routing-key="test.queue" --body="message-$i" 2>/dev/null
-  else
-    # Use management HTTP API to publish
-    curl -s -u guest:guest -X POST "http://127.0.0.1:15672/api/exchanges/%2f/amq.default/publish" \
-      -H "content-type: application/json" \
-      -d "{\"properties\":{},\"routing_key\":\"test.queue\",\"payload\":\"message-$i\",\"payload_encoding\":\"string\"}" > /dev/null 2>&1
-  fi
+  python3 -c "
+import pika
+conn = pika.BlockingConnection(pika.ConnectionParameters('127.0.0.1'))
+ch = conn.channel()
+ch.queue_declare(queue='capture-test')
+ch.basic_publish(exchange='', routing_key='capture-test', body='message-$i')
+conn.close()
+" 2>/dev/null
 
   # Memcached (no auth, no SSL)
   (echo -e "set key$i 0 60 7\r\nround-$i\r"; sleep 0.2) | nc 127.0.0.1 11211 > /dev/null 2>&1
