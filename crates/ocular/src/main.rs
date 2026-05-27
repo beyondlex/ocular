@@ -95,6 +95,7 @@ fn load_config() -> Result<(Config, PathBuf, PathBuf)> {
         Some(PathBuf::from("ocular.toml")),
         std::env::var("XDG_CONFIG_HOME").ok().map(|d| PathBuf::from(d).join("ocular/ocular.toml")),
         dirs::config_dir().map(|d| d.join("ocular/ocular.toml")),
+        std::env::var("HOME").ok().map(|d| PathBuf::from(d).join(".config/ocular/ocular.toml")),
     ];
     for candidate in candidates.iter().flatten() {
         if candidate.exists() {
