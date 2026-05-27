@@ -9,18 +9,7 @@ use tokio::sync::broadcast;
 use tracing::{info, warn, error, debug};
 
 pub use ocular_protocol::ProxyEvent;
-
-/// Connection state for a proxy component, shared between proxy and TUI
-#[derive(Clone, Default)]
-pub struct ConnectionState {
-    pub active_connections: usize,
-    pub has_connector: bool,
-    pub last_error: Option<String>,
-    pub last_active_at: Option<SystemTime>,
-}
-
-/// Shared map from component name to connection state
-pub type StatusMap = Arc<Mutex<std::collections::HashMap<String, ConnectionState>>>;
+pub use ocular_protocol::{ConnectionState, StatusMap};
 
 /// Pending request info
 struct PendingRequest {

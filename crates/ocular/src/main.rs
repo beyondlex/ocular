@@ -247,8 +247,9 @@ fn spawn_proxy(
             };
             let name = cfg.name.clone();
             let shutdown_rx = shutdown_rx.clone();
+            let status = status.clone();
             tokio::spawn(async move {
-                if let Err(e) = ocular_capture::run_capture(capture_cfg, tx.clone(), shutdown_rx).await {
+                if let Err(e) = ocular_capture::run_capture(capture_cfg, tx.clone(), shutdown_rx, status).await {
                     let _ = tx.send(ocular_proxy::ProxyEvent::system_event(&name, format!("capture error: {}", e)));
                     tracing::error!(error = %e, "capture fatal error");
                 }

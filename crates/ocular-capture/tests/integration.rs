@@ -17,8 +17,9 @@ async fn capture_redis_traffic() {
     };
 
     let tx_clone = tx.clone();
+    let status: ocular_protocol::StatusMap = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     tokio::spawn(async move {
-        if let Err(e) = ocular_capture::run_capture(config, tx_clone, shutdown_rx).await {
+        if let Err(e) = ocular_capture::run_capture(config, tx_clone, shutdown_rx, status).await {
             eprintln!("capture error: {}", e);
         }
     });

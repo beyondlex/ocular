@@ -16,6 +16,20 @@ pub use handler::ProtocolHandler;
 pub use handlers::*;
 
 use std::time::{Duration, SystemTime};
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+
+/// Connection state for a proxy/capture component (shared with TUI for status display)
+#[derive(Debug, Clone, Default)]
+pub struct ConnectionState {
+    pub active_connections: usize,
+    pub has_connector: bool,
+    pub last_error: Option<String>,
+    pub last_active_at: Option<SystemTime>,
+}
+
+/// Shared map from component name to connection state
+pub type StatusMap = Arc<Mutex<HashMap<String, ConnectionState>>>;
 
 /// A single request→response event (merged)
 #[derive(Debug, Clone)]

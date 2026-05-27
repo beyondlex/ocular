@@ -35,6 +35,8 @@ pub struct TcpStreamState {
     pub request_buf: Vec<u8>,
     pub response_buf: Vec<u8>,
     pub pending_request: Option<PendingRequest>,
+    /// MySQL: tracks whether the handshake phase is complete.
+    pub handshake_done: bool,
 }
 
 impl TcpStreamState {
@@ -43,6 +45,7 @@ impl TcpStreamState {
             request_buf: Vec::with_capacity(4096),
             response_buf: Vec::with_capacity(4096),
             pending_request: None,
+            handshake_done: true, // default true for non-MySQL protocols
         }
     }
 

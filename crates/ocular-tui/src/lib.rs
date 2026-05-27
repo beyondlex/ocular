@@ -700,6 +700,7 @@ pub async fn run(
 
     let mut last_mtime = SystemTime::UNIX_EPOCH;
     let mut proxy_change_rx = proxy_change_rx;
+    let mut last_tick = std::time::Instant::now();
 
     loop {
         // Dashboard / NewGroup modes
@@ -1139,6 +1140,11 @@ pub async fn run(
         if app.dirty {
             terminal.draw(|f| ui(f, &mut app))?;
             app.dirty = false;
+            last_tick = std::time::Instant::now();
+        } else if last_tick.elapsed() >= Duration::from_secs(1) {
+            // Periodic redraw for status indicator cooldown
+            terminal.draw(|f| ui(f, &mut app))?;
+            last_tick = std::time::Instant::now();
         }
 
         if event::poll(Duration::from_millis(50))? {
