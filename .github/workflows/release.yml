@@ -42,7 +42,8 @@ jobs:
           wget -q https://www.tcpdump.org/release/libpcap-1.10.5.tar.xz
           tar xf libpcap-1.10.5.tar.xz
           cd libpcap-1.10.5
-          CC=musl-gcc CFLAGS="-I/usr/include" ./configure --prefix=/usr/local/musl --disable-shared --with-pcap=linux --without-libnl
+          CC=musl-gcc CFLAGS="-I/usr/include -static" LDFLAGS="-static" \
+            ./configure --host=x86_64-linux-musl --prefix=/usr/local/musl --disable-shared --with-pcap=linux --without-libnl
           make -j$(nproc)
           sudo make install
           echo "PCAP_LIBDIR=/usr/local/musl/lib" >> $GITHUB_ENV
