@@ -713,6 +713,7 @@ version = "0.10.1"
 dependencies = [
  "anyhow",
  "chrono",
+ "crossterm",
  "dirs",
  "ocular-capture",
  "ocular-protocol",
