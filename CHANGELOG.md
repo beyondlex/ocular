@@ -1,5 +1,45 @@
 # Changelog
 
+## v0.11.0 (2026-05-27)
+
+### New Features
+- **CLI subcommands** — `ocular proxy <proto> [host]` and `ocular capture/cap <proto> [host]`
+  - Skip the TUI dashboard, output events directly to terminal
+  - Colored output by default, `--raw` for plain text, `--json` for JSON (one object per line)
+  - Auto-detect: stdout is TTY → color, pipe → raw
+  - Default host `127.0.0.1` and protocol default port when omitted
+  - Proxy auto-assigns listen port (remote_port + 10000, fallback random)
+  - Capture auto-detects interface (local → loopback, remote → default NIC)
+- **`--tui` / `-t` flag** — launch minimal TUI preview from CLI subcommands
+  - Full TUI features (vim nav, visual select, yank, filter, leader menu)
+  - No component pane, `q` exits directly (no dashboard)
+- **`--help` / `-h`** — colored help with usage, shorthand examples, port/interface docs
+- **Linux capture mode** — libpcap support with `setcap cap_net_raw+ep` permissions
+  - Auto-detect default interface via `ip route show default`
+  - Platform-specific permission hints in error messages
+
+### Improvements
+- **Capture status indicator** — component pane shows green dot when traffic flows (3s cooldown)
+- **Periodic TUI redraw** — status indicators update without user input (1s tick)
+- **Config under sudo** — `$HOME/.config/ocular` fallback when `dirs::config_dir()` fails
+- **Empty interface default** — TUI proxy form without interface uses platform default (lo0/lo)
+
+### Refactoring
+- **ProtocolHandler trait extended** — `capture_handshake()`, `message_length()`, `default_port()`
+  - Adding a new protocol no longer requires changes to capture core code
+  - MySQL handshake detection moved from hardcoded logic to trait method
+  - MongoDB message boundary detection moved to trait method
+- **HandshakeAction enum** — `Done` / `Skip` / `Complete` for generic handshake handling
+- **Removed duplicate Direction enum** — reuse `ocular_protocol::Direction` in capture crate
+- **CLI default_port** delegates to `handler.default_port()`
+
+### Bug Fixes
+- **MySQL capture mode** — skip multi-round auth handshake (caching_sha2_password)
+- **MySQL capture buffer** — clear unparseable packets (COM_FIELD_LIST) to prevent pollution
+- **MongoDB capture** — discard OP_QUERY/OP_REPLY packets that parser doesn't support
+- **MongoDB response buffer** — drain complete but unparseable responses
+- **Leader menu in preview** — hide irrelevant items (edit config, switch group, panel switch)
+
 ## v0.10.0 (2026-05-26)
 
 ### New Features
