@@ -86,13 +86,18 @@ Observe traffic without modifying your application's connection settings. Ocular
 name = "redis"
 protocol = "redis"
 mode = "capture"
-interface = "lo0"           # lo0 for loopback, en0 for LAN
+interface = "lo0"           # macOS: lo0/en0. Linux: lo/eth0
 remote = "127.0.0.1:6379"  # The real service address
 ```
 
 ```bash
-sudo ocular   # Requires BPF permissions for packet capture
-# Or: sudo chmod g+r /dev/bpf* && ocular  (no sudo needed after this)
+sudo ocular   # Requires packet capture permissions
+
+# macOS — grant BPF access (no sudo needed after this, until reboot):
+sudo chmod g+r /dev/bpf*
+
+# Linux — grant capture capability (persistent):
+sudo setcap cap_net_raw+ep $(which ocular)
 ```
 
 ```
@@ -166,7 +171,7 @@ Default ports: redis=6379, mysql=3306, postgres=5432, amqp=5672, mongodb=27017, 
 Ocular supports two modes:
 
 - **Proxy mode** (default) — lightweight TCP proxies sit between your app and middleware. You point your app to the proxy port.
-- **Capture mode** — passive packet capture via libpcap (macOS) observes traffic on the wire. No connection changes needed, but requires elevated permissions.
+- **Capture mode** — passive packet capture via libpcap (macOS/Linux) observes traffic on the wire. No connection changes needed, but requires elevated permissions.
 
 In both modes, Ocular parses the wire protocol and displays structured events in a terminal dashboard.
 

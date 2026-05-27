@@ -48,8 +48,13 @@ pub async fn run_capture(
         .timeout(100) // ms, allows periodic shutdown checks
         .open()
         .with_context(|| format!(
-            "failed to activate capture on {} — permission denied. Run with sudo or: sudo chmod g+r /dev/bpf*",
-            config.interface
+            "failed to activate capture on {} — permission denied. {}",
+            config.interface,
+            if cfg!(target_os = "macos") {
+                "Run with sudo or: sudo chmod g+r /dev/bpf*"
+            } else {
+                "Run with sudo or: sudo setcap cap_net_raw+ep <binary>"
+            }
         ))?;
 
     let filter = format!("tcp port {}", port);
