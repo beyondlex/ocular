@@ -37,12 +37,12 @@ jobs:
         if: matrix.container
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools libpcap-dev
+          sudo apt-get install -y musl-tools linux-libc-dev
           # Build static libpcap for musl
           wget -q https://www.tcpdump.org/release/libpcap-1.10.5.tar.xz
           tar xf libpcap-1.10.5.tar.xz
           cd libpcap-1.10.5
-          CC=musl-gcc ./configure --prefix=/usr/local/musl --disable-shared --with-pcap=linux
+          CC=musl-gcc CFLAGS="-I/usr/include" ./configure --prefix=/usr/local/musl --disable-shared --with-pcap=linux --without-libnl
           make -j$(nproc)
           sudo make install
           echo "PCAP_LIBDIR=/usr/local/musl/lib" >> $GITHUB_ENV
