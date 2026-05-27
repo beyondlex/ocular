@@ -12,6 +12,7 @@ use tracing_appender::rolling;
 use tracing_subscriber::{fmt, EnvFilter};
 
 mod demo;
+mod cli;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -296,6 +297,12 @@ async fn main() -> Result<()> {
         let config_path = PathBuf::from("ocular.toml");
         let demo_status: ocular_proxy::StatusMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
         return ocular_tui::run(rx, components, theme, config_path.clone(), None, true, false, None, None, None, None, config_path, demo_status).await;
+    }
+
+    // CLI subcommands: capture/cap/proxy — skip TUI, output to terminal
+    if args.len() >= 2 && matches!(args[1].as_str(), "capture" | "cap" | "proxy") {
+        let cli_args = cli::parse_cli_args(&args)?;
+        return cli::run_cli(cli_args).await;
     }
 
     let (config, config_dir, config_path) = load_config()?;

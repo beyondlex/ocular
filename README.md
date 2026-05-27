@@ -105,6 +105,61 @@ Your App ──→ Redis (6379)    # Direct connection, no changes
 
 > **Note:** Capture mode and proxy mode are mutually exclusive per service. Use one or the other.
 
+### CLI mode (no TUI, terminal output)
+
+Skip the dashboard and output events directly to the terminal. Ideal for scripting, AI agents, and quick debugging.
+
+```bash
+# Proxy mode — auto-assigns listen port (3306 + 10000 = 13306)
+ocular proxy mysql 192.168.0.184
+# ↳ equivalent: ocular proxy mysql 192.168.0.184:3306 -l 127.0.0.1:13306
+# Starts a proxy on localhost:13306 forwarding to the remote MySQL server.
+
+# Capture mode — passive sniffing, no connection changes
+sudo ocular capture mysql 192.168.0.184
+# ↳ equivalent: sudo ocular capture mysql 192.168.0.184:3306 -i en0
+# Passively captures MySQL traffic to the remote host on the default network interface.
+# Requires sudo for BPF (packet capture) permissions on macOS.
+# To avoid sudo: sudo chmod g+r /dev/bpf* (one-time setup, persists until reboot).
+
+# Minimal — defaults to 127.0.0.1 with protocol's default port
+ocular proxy redis
+# ↳ equivalent: ocular proxy redis 127.0.0.1:6379 -l 127.0.0.1:16379
+# Proxies local Redis traffic, listening on port 16379.
+
+# JSON output (one object per line, for programmatic parsing)
+ocular proxy mysql --json
+# ↳ equivalent: ocular proxy mysql 127.0.0.1:3306 --json
+# Proxies local MySQL and outputs each event as a JSON object.
+
+# Raw output (no colors, for file redirection)
+ocular proxy mysql 192.168.0.184 --raw >> events.log
+# ↳ equivalent: ocular proxy mysql 192.168.0.184:3306 --raw >> events.log
+# Proxies remote MySQL with plain text output appended to a log file.
+
+# Override interface or listen address
+sudo ocular cap mysql 192.168.0.184 -i en0
+# ↳ `cap` is short for `capture`. Captures MySQL traffic on the en0 interface.
+ocular proxy postgres 10.0.0.5 -l 127.0.0.1:25432
+# ↳ equivalent: ocular proxy postgres 10.0.0.5:5432 -l 127.0.0.1:25432
+# Proxies remote Postgres with a custom listen port.
+```
+
+```
+11:31:34.444 [mysql] select @@version_comment limit 1 → ResultSet (1 rows, 1 cols) 1.75ms
+11:31:34.448 [mysql] SELECT * FROM users LIMIT 5 → ResultSet (5 rows, 5 cols) 3.73ms
+```
+
+| Option | Description |
+|--------|-------------|
+| `--json` | Output as JSON (one object per line) |
+| `--raw` | No ANSI colors (auto-enabled when stdout is not a TTY) |
+| `--color` | Force colored output |
+| `-i`, `--interface` | Network interface for capture mode |
+| `-l`, `--listen` | Listen address for proxy mode (default: auto) |
+
+Default ports: redis=6379, mysql=3306, postgres=5432, amqp=5672, mongodb=27017, http=9200, memcached=11211, kafka=9092
+
 ## How It Works
 
 Ocular supports two modes:
