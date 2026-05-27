@@ -60,12 +60,12 @@ conn.close()
     -d "{\"val\":\"round-$i\",\"ts\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" > /dev/null 2>&1
   curl -s "http://127.0.0.1:9200/capture-test/_search?size=3" > /dev/null 2>&1
 
-  # Kafka (no auth)
+  # Kafka (no auth) — uses kafka-capture service on port 9192 (advertised as 127.0.0.1:9192)
   if command -v kcat &> /dev/null; then
-    echo "message-$i" | kcat -P -b 127.0.0.1:9092 -t capture-test 2>/dev/null
-    kcat -C -b 127.0.0.1:9092 -t capture-test -c 1 -o end 2>/dev/null
+    echo "message-$i" | kcat -P -b 127.0.0.1:9192 -t capture-test 2>/dev/null
+    kcat -C -b 127.0.0.1:9192 -t capture-test -c 1 -o end 2>/dev/null
   elif command -v kafka-console-producer.sh &> /dev/null; then
-    echo "message-$i" | kafka-console-producer.sh --broker-list 127.0.0.1:9092 --topic capture-test 2>/dev/null
+    echo "message-$i" | kafka-console-producer.sh --broker-list 127.0.0.1:9192 --topic capture-test 2>/dev/null
   fi
 
   sleep $SLEEP
