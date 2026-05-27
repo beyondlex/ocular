@@ -47,7 +47,7 @@ jobs:
             "cp -r /usr/include/asm-generic /usr/local/musl/include/",
             "wget -q https://www.tcpdump.org/release/libpcap-1.10.5.tar.xz -O /tmp/libpcap.tar.xz",
             "tar xf /tmp/libpcap.tar.xz -C /tmp",
-            "cd /tmp/libpcap-1.10.5 && CC=musl-gcc ./configure --host=x86_64-linux-musl --prefix=/usr/local/musl --disable-shared --with-pcap=linux --without-libnl --disable-dbus && make -j$(nproc) && make install"
+            "cd /tmp/libpcap-1.10.5 && CC=musl-gcc CPPFLAGS=-I/usr/local/musl/include ./configure --host=x86_64-linux-musl --prefix=/usr/local/musl --disable-shared --with-pcap=linux --without-libnl --disable-dbus && make -j$(nproc) && make install"
           ]
           [target.x86_64-unknown-linux-musl.env]
           passthrough = ["LIBPCAP_LIBDIR"]
