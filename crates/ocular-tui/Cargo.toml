@@ -18,6 +18,6 @@ toml_edit = "0.22"
 chrono = "0.4"
 fuzzy-matcher = "0.3"
 sqlformat = "0.2"
-ocular-proxy = { path = "../ocular-proxy", version = "0.11.0" }
-ocular-protocol = { path = "../ocular-protocol", version = "0.11.0" }
+ocular-proxy = { path = "../ocular-proxy", version = "0.11.1" }
+ocular-protocol = { path = "../ocular-protocol", version = "0.11.1" }
 tui-input = "0.11"
