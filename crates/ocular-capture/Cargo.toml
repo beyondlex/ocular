@@ -12,4 +12,4 @@ anyhow.workspace = true
 tracing.workspace = true
 pcap = "2"
 etherparse = "0.16"
-ocular-protocol = { path = "../ocular-protocol", version = "0.10.1" }
+ocular-protocol = { path = "../ocular-protocol", version = "0.11.0" }
