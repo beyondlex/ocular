@@ -98,13 +98,13 @@ fn load_config(config_override: Option<PathBuf>) -> Result<(Config, PathBuf, Pat
             std::env::var("XDG_CONFIG_HOME").ok().map(|d| PathBuf::from(d).join("ocular/ocular.toml")),
             dirs::config_dir().map(|d| d.join("ocular/ocular.toml")),
             std::env::var("HOME").ok().map(|d| PathBuf::from(d).join(".config/ocular/ocular.toml")),
-            std::env::var("SUDO_USER").ok().and_then(|user| {
+            std::env::var("SUDO_USER").ok().map(|user| {
                 let home = if cfg!(target_os = "macos") {
                     PathBuf::from("/Users").join(&user)
                 } else {
                     PathBuf::from("/home").join(&user)
                 };
-                Some(home.join(".config/ocular/ocular.toml"))
+                home.join(".config/ocular/ocular.toml")
             }),
         ],
     };
@@ -372,11 +372,9 @@ async fn main() -> Result<()> {
         let mut i = 1;
         let mut found = None;
         while i < args.len() {
-            if args[i] == "--config" || args[i] == "-c" {
-                if i + 1 < args.len() {
-                    found = Some(PathBuf::from(&args[i + 1]));
-                    break;
-                }
+            if (args[i] == "--config" || args[i] == "-c") && i + 1 < args.len() {
+                found = Some(PathBuf::from(&args[i + 1]));
+                break;
             }
             i += 1;
         }
