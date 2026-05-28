@@ -12,8 +12,39 @@ use std::time::{Duration, Instant};
 
 // ─── Protocol table ─────────────────────────────────────────────────────────
 
-const SELECTION_HINT: &str = "\u{2191}\u{2193} navigate  Enter confirm  Esc back  Ctrl+C quit";
+const SELECTION_HINT: &str = "\u{2191}\u{2193} navigate  Enter confirm  ? help  Esc back  Ctrl+C quit";
 const INPUT_HINT: &str = "Enter confirm  Esc back";
+
+// ─── Mode-selection help popup ──────────────────────────────────────────────
+
+const MODE_HELP: &[&str] = &[
+    "\u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500} ? Help \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}",
+    "\u{2502}                                                  \u{2502}",
+    "\u{2502}  \u{2500}\u{2500} Proxy Mode \u{2500}\u{2500}                                \u{2502}",
+    "\u{2502}                                                  \u{2502}",
+    "\u{2502}    \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}      \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}     \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}  \u{2502}",
+    "\u{2502}    \u{2502} Client  \u{2502}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{25b6}\u{2502}  Ocular  \u{2502}\u{2500}\u{2500}\u{2500}\u{2500}\u{25b6}\u{2502} Server \u{2502}  \u{2502}",
+    "\u{2502}    \u{2502}  App    \u{2502}:8080 \u{2502}  :8080   \u{2502}     \u{2502} :6379  \u{2502}  \u{2502}",
+    "\u{2502}    \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}      \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}     \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}  \u{2502}",
+    "\u{2502}   \u{25b6} Point your app to ocular listen address      \u{2502}",
+    "\u{2502}   \u{25b6} SSL decrypted \u{2192} full payload visible         \u{2502}",
+    "\u{2502}                                                  \u{2502}",
+    "\u{2502}  \u{2500}\u{2500} Capture Mode \u{2500}\u{2500}                              \u{2502}",
+    "\u{2502}                                                  \u{2502}",
+    "\u{2502}    \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}                 \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}        \u{2502}",
+    "\u{2502}    \u{2502} Client  \u{2502}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{25b6}\u{2502} server \u{2502}        \u{2502}",
+    "\u{2502}    \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}  \u{2571}              \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}        \u{2502}",
+    "\u{2502}                \u{2571}\u{2571}\u{2571}\u{2571}\u{2571}\u{2571}\u{2571}\u{2571}\u{2571}  :6379                  \u{2502}",
+    "\u{2502}    \u{250c}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2510}                                   \u{2502}",
+    "\u{2502}    \u{2502} Ocular  \u{2502} (passive interface capture)       \u{2502}",
+    "\u{2502}    \u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}                                   \u{2502}",
+    "\u{2502}   \u{25b6} No app config change needed                  \u{2502}",
+    "\u{2502}   \u{25b6} SSL encrypted \u{2192} only metadata visible        \u{2502}",
+    "\u{2502}   \u{25b6} Requires sudo / root privileges              \u{2502}",
+    "\u{2502}                                                  \u{2502}",
+    "\u{2502}           Press ? or Esc to close                \u{2502}",
+    "\u{2514}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2518}",
+];
 
 const PROTOCOLS: &[(&str, &str, u16)] = &[
     ("redis",         "Redis",         6379),
@@ -96,12 +127,14 @@ impl Term {
 /// Returns `Ok(Some(index))` on Enter, `Ok(None)` on Esc (go back).
 /// Ctrl+C returns Err.
 /// Hint is rendered below the options (static, not re-rendered on each keypress).
-fn read_selection(options: &[(&str, &str)], hint: &str) -> Result<Option<usize>> {
+fn read_selection(options: &[(&str, &str)], hint: &str, help: Option<&[&str]>) -> Result<Option<usize>> {
     terminal::enable_raw_mode()?;
     let _ = execute!(stdout(), cursor::Hide);
     let mut selected: usize = 0;
     let n = options.len();
     let hint_lines: u16 = if hint.is_empty() { 0 } else { 2 }; // blank + hint
+    let mut show_help = false;
+    let mut help_line_count: u16 = 0;
 
     /// Render all options starting at the current cursor line.
     /// After rendering, cursor is N lines below the first option.
@@ -140,23 +173,33 @@ fn read_selection(options: &[(&str, &str)], hint: &str) -> Result<Option<usize>>
         }
     }
 
+    fn render_help(lines: &[&str]) {
+        Term::println("");
+        Term::color(Color::Cyan);
+        for line in lines {
+            Term::println(&format!("    {}", line));
+        }
+        Term::reset();
+    }
+
     // Initial render: options + hint
     render_options(options, selected);
     render_hint(hint);
     Term::flush();
 
     loop {
-        // Cursor is N+hint_lines below first option line — move back to top
-        let _ = execute!(stdout(), cursor::MoveUp(n as u16 + hint_lines), cursor::MoveToColumn(0));
+        // Cursor is N+hint_lines+help_line_count below first option line — move back to top
+        let total_extra = hint_lines + help_line_count;
+        let _ = execute!(stdout(), cursor::MoveUp(n as u16 + total_extra), cursor::MoveToColumn(0));
 
         if let Event::Key(KeyEvent { code, modifiers, .. }) = event::read()? {
             if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL)) {
-                // Clean up: clear all option lines + hint, cursor ends after area
+                // Clean up: clear all option lines + hint + help, cursor ends after area
                 for _ in 0..n {
                     Term::clear_line();
                     let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                 }
-                for _ in 0..hint_lines {
+                for _ in 0..total_extra {
                     Term::clear_line();
                     let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                 }
@@ -169,18 +212,27 @@ fn read_selection(options: &[(&str, &str)], hint: &str) -> Result<Option<usize>>
                     selected = selected.saturating_sub(1);
                     render_options(options, selected);
                     render_hint(hint);
+                    if show_help {
+                        if let Some(h) = help { render_help(h); }
+                    }
                     Term::flush();
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     selected = (selected + 1).min(n - 1);
                     render_options(options, selected);
                     render_hint(hint);
+                    if show_help {
+                        if let Some(h) = help { render_help(h); }
+                    }
                     Term::flush();
                 }
                 KeyCode::Enter => {
                     render_options(options, selected);
                     render_hint(hint);
-                    let _ = execute!(stdout(), cursor::MoveUp(n as u16 + hint_lines), cursor::MoveToColumn(0));
+                    if show_help {
+                        if let Some(h) = help { render_help(h); }
+                    }
+                    let _ = execute!(stdout(), cursor::MoveUp(n as u16 + total_extra), cursor::MoveToColumn(0));
                     // Skip to selected line
                     for _ in 0..selected {
                         let _ = execute!(stdout(), cursor::MoveToNextLine(1));
@@ -198,13 +250,13 @@ fn read_selection(options: &[(&str, &str)], hint: &str) -> Result<Option<usize>>
                     }
                     Term::reset();
                     Term::print("\r\n");
-                    // Clear remaining option lines below selected + hint lines
+                    // Clear remaining option lines below selected + hint + help lines
                     let remaining = n - 1 - selected;
                     for _ in 0..remaining {
                         Term::clear_line();
                         let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                     }
-                    for _ in 0..hint_lines {
+                    for _ in 0..total_extra {
                         Term::clear_line();
                         let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                     }
@@ -213,18 +265,66 @@ fn read_selection(options: &[(&str, &str)], hint: &str) -> Result<Option<usize>>
                     return Ok(Some(selected));
                 }
                 KeyCode::Esc => {
-                    // Cancel: clear all option lines + hint, cursor ends after area
-                    for _ in 0..n {
+                    if show_help {
+                        // Close help popup — clear old help, don't cancel selection
+                        for _ in 0..(n as u16 + hint_lines) {
+                            let _ = execute!(stdout(), cursor::MoveToNextLine(1));
+                        }
+                        for _ in 0..help_line_count {
+                            Term::clear_line();
+                            let _ = execute!(stdout(), cursor::MoveToNextLine(1));
+                        }
+                        let _ = execute!(stdout(), cursor::MoveUp(n as u16 + total_extra), cursor::MoveToColumn(0));
+                        show_help = false;
+                        help_line_count = 0;
+                        render_options(options, selected);
+                        render_hint(hint);
+                        Term::flush();
+                    } else {
+                        // Cancel: clear all option lines + hint, cursor ends after area
+                        for _ in 0..n {
+                            Term::clear_line();
+                            let _ = execute!(stdout(), cursor::MoveToNextLine(1));
+                        }
+                        for _ in 0..hint_lines {
+                            Term::clear_line();
+                            let _ = execute!(stdout(), cursor::MoveToNextLine(1));
+                        }
+                        let _ = execute!(stdout(), cursor::Show);
+                        terminal::disable_raw_mode()?;
+                        return Ok(None);
+                    }
+                }
+                KeyCode::Char('?') if help.is_some() => {
+                    let old_help_total = help_line_count;
+
+                    // Skip past option lines to the help area
+                    for _ in 0..(n as u16 + hint_lines) {
+                        let _ = execute!(stdout(), cursor::MoveToNextLine(1));
+                    }
+                    // Clear any previously rendered help lines
+                    for _ in 0..old_help_total {
                         Term::clear_line();
                         let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                     }
-                    for _ in 0..hint_lines {
-                        Term::clear_line();
-                        let _ = execute!(stdout(), cursor::MoveToNextLine(1));
+                    // Return to first option line (matches existing MoveUp invariant)
+                    let _ = execute!(stdout(), cursor::MoveUp(n as u16 + total_extra), cursor::MoveToColumn(0));
+
+                    // Toggle help state
+                    show_help = !show_help;
+                    if show_help {
+                        help_line_count = help.unwrap().len() as u16 + 1; // +1 for blank separator
+                    } else {
+                        help_line_count = 0;
                     }
-                    let _ = execute!(stdout(), cursor::Show);
-                    terminal::disable_raw_mode()?;
-                    return Ok(None);
+
+                    // Re-render
+                    render_options(options, selected);
+                    render_hint(hint);
+                    if show_help {
+                        if let Some(h) = help { render_help(h); }
+                    }
+                    Term::flush();
                 }
                 _ => {
                     // Unknown key — just re-render (already rendered at top of loop)
@@ -659,7 +759,7 @@ pub async fn run_wizard() -> Result<Option<PathBuf>> {
             let overwrite = match read_selection(&[
                 ("Cancel", "keep existing config"),
                 ("Overwrite", "replace with new config"),
-            ], "\u{2191}\u{2193} navigate  Enter confirm  Esc back") {
+            ], "\u{2191}\u{2193} navigate  Enter confirm  Esc back", None) {
                 Ok(Some(i)) => i == 1,
                 Ok(None) => return Ok(None),
                 Err(_) => return Ok(None),
@@ -691,7 +791,7 @@ pub async fn run_wizard() -> Result<Option<PathBuf>> {
                 match read_selection(&[
                     ("Proxy", "sit between app and service (handles SSL)"),
                     ("Capture", "passive sniffing, zero config on app (needs sudo)"),
-                ], SELECTION_HINT) {
+                ], SELECTION_HINT, Some(MODE_HELP)) {
                     Ok(Some(i)) => {
                         mode = if i == 0 { Mode::Proxy } else { Mode::Capture };
                         step = 2;
@@ -714,7 +814,7 @@ pub async fn run_wizard() -> Result<Option<PathBuf>> {
                     .iter()
                     .map(|(l, d)| (l.as_str(), d.as_str()))
                     .collect();
-                match read_selection(&proto_refs, SELECTION_HINT) {
+                match read_selection(&proto_refs, SELECTION_HINT, None) {
                     Ok(Some(i)) => {
                         proto_idx = i;
                         step = 3;
@@ -733,7 +833,7 @@ pub async fn run_wizard() -> Result<Option<PathBuf>> {
                 match read_selection(&[
                     ("Local", "127.0.0.1"),
                     ("Remote", "another machine"),
-                ], SELECTION_HINT) {
+                ], SELECTION_HINT, None) {
                     Ok(Some(i)) => {
                         loc_idx = i;
                         step = 4;
@@ -901,7 +1001,7 @@ pub async fn run_wizard() -> Result<Option<PathBuf>> {
                 match read_selection(&[
                     ("No, I'm done", ""),
                     ("Yes, add another", ""),
-                ], SELECTION_HINT) {
+                ], SELECTION_HINT, None) {
                     Ok(Some(0)) => break,
                     Ok(Some(_)) => {
                         // Reset wizard state for next proxy; go back to step 1
