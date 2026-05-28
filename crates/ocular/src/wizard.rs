@@ -118,23 +118,84 @@ impl Term {
         let _ = execute!(stdout(), Print(format!("{}\r\n", s)));
     }
 
+    fn goto_row(row: u16) {
+        let _ = execute!(stdout(), cursor::MoveTo(0, row));
+    }
+
     fn flush() {
         let _ = stdout().flush();
     }
+}
+
+/// Compute the (row, col) to draw a centered overlay popup.
+fn popup_pos(lines: &[&str]) -> (u16, u16) {
+    let (tw, th) = terminal::size().unwrap_or((80, 24));
+    let popup_h = lines.len() as u16;
+    // popup content width is 50 + 2 border chars = 52
+    let popup_w: u16 = 52;
+    let row = th.saturating_sub(popup_h) / 2;
+    let col = tw.saturating_sub(popup_w) / 2;
+    (row, col)
+}
+
+/// Draw `lines` as a centered overlay and block until any key dismisses it.
+/// On exit, clears only the popup rectangle. The caller must do a full screen
+/// redraw (via `re_render`) to restore any header content that was overwritten.
+fn show_help_overlay(lines: &[&str]) -> Result<()> {
+    let (popup_row, popup_col) = popup_pos(lines);
+
+    // Clear the full screen to avoid leftover content bleeding through
+    Term::clear_screen();
+
+    // Draw popup content
+    Term::goto_row(popup_row);
+    for line in lines {
+        let _ = execute!(stdout(), cursor::MoveToColumn(popup_col));
+        Term::color(Color::Cyan);
+        Term::print(line);
+        Term::reset();
+        let _ = execute!(stdout(), cursor::MoveToNextLine(1));
+    }
+    Term::flush();
+
+    // Block until any key press (Ctrl+C still propagates as error)
+    loop {
+        match event::read()? {
+            Event::Key(KeyEvent { code: KeyCode::Char('c'), modifiers, .. })
+                if modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                terminal::disable_raw_mode()?;
+                bail!("cancelled");
+            }
+            Event::Key(_) => break,
+            _ => {} // ignore mouse / resize
+        }
+    }
+
+    // Clear screen; caller will do a full re-render to restore content
+    Term::clear_screen();
+
+    Ok(())
 }
 
 /// Read arrow-key selection from a list of options.
 /// Returns `Ok(Some(index))` on Enter, `Ok(None)` on Esc (go back).
 /// Ctrl+C returns Err.
 /// Hint is rendered below the options (static, not re-rendered on each keypress).
-fn read_selection(options: &[(&str, &str)], hint: &str, help: Option<&[&str]>) -> Result<Option<usize>> {
+/// When `help` is Some, pressing ? shows a centered overlay popup.
+/// `re_render` is called to redraw the full screen before showing the popup,
+/// since the overlay may overwrite header rows that need to be restored.
+fn read_selection(
+    options: &[(&str, &str)],
+    hint: &str,
+    help: Option<&[&str]>,
+    re_render: Option<impl Fn()>,
+) -> Result<Option<usize>> {
     terminal::enable_raw_mode()?;
     let _ = execute!(stdout(), cursor::Hide);
     let mut selected: usize = 0;
     let n = options.len();
     let hint_lines: u16 = if hint.is_empty() { 0 } else { 2 }; // blank + hint
-    let mut show_help = false;
-    let mut help_line_count: u16 = 0;
 
     /// Render all options starting at the current cursor line.
     /// After rendering, cursor is N lines below the first option.
@@ -173,33 +234,23 @@ fn read_selection(options: &[(&str, &str)], hint: &str, help: Option<&[&str]>) -
         }
     }
 
-    fn render_help(lines: &[&str]) {
-        Term::println("");
-        Term::color(Color::Cyan);
-        for line in lines {
-            Term::println(&format!("    {}", line));
-        }
-        Term::reset();
-    }
-
     // Initial render: options + hint
     render_options(options, selected);
     render_hint(hint);
     Term::flush();
 
     loop {
-        // Cursor is N+hint_lines+help_line_count below first option line — move back to top
-        let total_extra = hint_lines + help_line_count;
-        let _ = execute!(stdout(), cursor::MoveUp(n as u16 + total_extra), cursor::MoveToColumn(0));
+        // Cursor is N+hint_lines below first option line — move back to top
+        let _ = execute!(stdout(), cursor::MoveUp(n as u16 + hint_lines), cursor::MoveToColumn(0));
 
         if let Event::Key(KeyEvent { code, modifiers, .. }) = event::read()? {
             if matches!(code, KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL)) {
-                // Clean up: clear all option lines + hint + help, cursor ends after area
+                // Clean up: clear all option lines + hint, cursor ends after area
                 for _ in 0..n {
                     Term::clear_line();
                     let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                 }
-                for _ in 0..total_extra {
+                for _ in 0..hint_lines {
                     Term::clear_line();
                     let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                 }
@@ -212,27 +263,18 @@ fn read_selection(options: &[(&str, &str)], hint: &str, help: Option<&[&str]>) -
                     selected = selected.saturating_sub(1);
                     render_options(options, selected);
                     render_hint(hint);
-                    if show_help {
-                        if let Some(h) = help { render_help(h); }
-                    }
                     Term::flush();
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     selected = (selected + 1).min(n - 1);
                     render_options(options, selected);
                     render_hint(hint);
-                    if show_help {
-                        if let Some(h) = help { render_help(h); }
-                    }
                     Term::flush();
                 }
                 KeyCode::Enter => {
                     render_options(options, selected);
                     render_hint(hint);
-                    if show_help {
-                        if let Some(h) = help { render_help(h); }
-                    }
-                    let _ = execute!(stdout(), cursor::MoveUp(n as u16 + total_extra), cursor::MoveToColumn(0));
+                    let _ = execute!(stdout(), cursor::MoveUp(n as u16 + hint_lines), cursor::MoveToColumn(0));
                     // Skip to selected line
                     for _ in 0..selected {
                         let _ = execute!(stdout(), cursor::MoveToNextLine(1));
@@ -250,13 +292,13 @@ fn read_selection(options: &[(&str, &str)], hint: &str, help: Option<&[&str]>) -
                     }
                     Term::reset();
                     Term::print("\r\n");
-                    // Clear remaining option lines below selected + hint + help lines
+                    // Clear remaining option lines below selected + hint lines
                     let remaining = n - 1 - selected;
                     for _ in 0..remaining {
                         Term::clear_line();
                         let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                     }
-                    for _ in 0..total_extra {
+                    for _ in 0..hint_lines {
                         Term::clear_line();
                         let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                     }
@@ -265,66 +307,44 @@ fn read_selection(options: &[(&str, &str)], hint: &str, help: Option<&[&str]>) -
                     return Ok(Some(selected));
                 }
                 KeyCode::Esc => {
-                    if show_help {
-                        // Close help popup — clear old help, don't cancel selection
-                        for _ in 0..(n as u16 + hint_lines) {
-                            let _ = execute!(stdout(), cursor::MoveToNextLine(1));
-                        }
-                        for _ in 0..help_line_count {
-                            Term::clear_line();
-                            let _ = execute!(stdout(), cursor::MoveToNextLine(1));
-                        }
-                        let _ = execute!(stdout(), cursor::MoveUp(n as u16 + total_extra), cursor::MoveToColumn(0));
-                        show_help = false;
-                        help_line_count = 0;
-                        render_options(options, selected);
-                        render_hint(hint);
-                        Term::flush();
-                    } else {
-                        // Cancel: clear all option lines + hint, cursor ends after area
-                        for _ in 0..n {
-                            Term::clear_line();
-                            let _ = execute!(stdout(), cursor::MoveToNextLine(1));
-                        }
-                        for _ in 0..hint_lines {
-                            Term::clear_line();
-                            let _ = execute!(stdout(), cursor::MoveToNextLine(1));
-                        }
-                        let _ = execute!(stdout(), cursor::Show);
-                        terminal::disable_raw_mode()?;
-                        return Ok(None);
-                    }
-                }
-                KeyCode::Char('?') if help.is_some() => {
-                    let old_help_total = help_line_count;
-
-                    // Skip past option lines to the help area
-                    for _ in 0..(n as u16 + hint_lines) {
-                        let _ = execute!(stdout(), cursor::MoveToNextLine(1));
-                    }
-                    // Clear any previously rendered help lines
-                    for _ in 0..old_help_total {
+                    // Cancel: clear all option lines + hint, cursor ends after area
+                    for _ in 0..n {
                         Term::clear_line();
                         let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                     }
-                    // Return to first option line (matches existing MoveUp invariant)
-                    let _ = execute!(stdout(), cursor::MoveUp(n as u16 + total_extra), cursor::MoveToColumn(0));
-
-                    // Toggle help state
-                    show_help = !show_help;
-                    if show_help {
-                        help_line_count = help.unwrap().len() as u16 + 1; // +1 for blank separator
-                    } else {
-                        help_line_count = 0;
+                    for _ in 0..hint_lines {
+                        Term::clear_line();
+                        let _ = execute!(stdout(), cursor::MoveToNextLine(1));
                     }
+                    let _ = execute!(stdout(), cursor::Show);
+                    terminal::disable_raw_mode()?;
+                    return Ok(None);
+                }
+                KeyCode::Char('?') if help.is_some() => {
+                    // The centered popup overlaps with header rows (logo,
+                    // breadcrumb, question). The only reliable way to restore
+                    // them is a full clear_screen + redraw, same as the main
+                    // TUI does every frame with ratatui.
 
-                    // Re-render
+                    // Disable raw mode so re_render's println!() emits \r\n properly
+                    terminal::disable_raw_mode()?;
+
+                    // Step 1: full redraw before showing popup
+                    if let Some(rr) = re_render.as_ref() { rr(); }
+
+                    // Step 2: show popup (enables raw mode internally for key wait)
+                    terminal::enable_raw_mode()?;
+                    show_help_overlay(help.unwrap())?;
+
+                    // Step 3: full redraw after popup dismisses
+                    terminal::disable_raw_mode()?;
+                    if let Some(rr) = re_render.as_ref() { rr(); }
+                    terminal::enable_raw_mode()?;
                     render_options(options, selected);
                     render_hint(hint);
-                    if show_help {
-                        if let Some(h) = help { render_help(h); }
-                    }
                     Term::flush();
+                    // Cursor ends at same position as initial render,
+                    // matching the loop's MoveUp invariant.
                 }
                 _ => {
                     // Unknown key — just re-render (already rendered at top of loop)
@@ -759,7 +779,7 @@ pub async fn run_wizard() -> Result<Option<PathBuf>> {
             let overwrite = match read_selection(&[
                 ("Cancel", "keep existing config"),
                 ("Overwrite", "replace with new config"),
-            ], "\u{2191}\u{2193} navigate  Enter confirm  Esc back", None) {
+            ], "\u{2191}\u{2193} navigate  Enter confirm  Esc back", None, None::<fn()>) {
                 Ok(Some(i)) => i == 1,
                 Ok(None) => return Ok(None),
                 Err(_) => return Ok(None),
@@ -791,7 +811,11 @@ pub async fn run_wizard() -> Result<Option<PathBuf>> {
                 match read_selection(&[
                     ("Proxy", "sit between app and service (handles SSL)"),
                     ("Capture", "passive sniffing, zero config on app (needs sudo)"),
-                ], SELECTION_HINT, Some(MODE_HELP)) {
+                ], SELECTION_HINT, Some(MODE_HELP), Some(|| {
+                    render_screen(&proxies);
+                    print_breadcrumb(step, mode, proto_idx, loc_idx, &host, port);
+                    print_question("How do you want to observe traffic?");
+                })) {
                     Ok(Some(i)) => {
                         mode = if i == 0 { Mode::Proxy } else { Mode::Capture };
                         step = 2;
@@ -814,7 +838,7 @@ pub async fn run_wizard() -> Result<Option<PathBuf>> {
                     .iter()
                     .map(|(l, d)| (l.as_str(), d.as_str()))
                     .collect();
-                match read_selection(&proto_refs, SELECTION_HINT, None) {
+                match read_selection(&proto_refs, SELECTION_HINT, None, None::<fn()>) {
                     Ok(Some(i)) => {
                         proto_idx = i;
                         step = 3;
@@ -833,7 +857,7 @@ pub async fn run_wizard() -> Result<Option<PathBuf>> {
                 match read_selection(&[
                     ("Local", "127.0.0.1"),
                     ("Remote", "another machine"),
-                ], SELECTION_HINT, None) {
+                ], SELECTION_HINT, None, None::<fn()>) {
                     Ok(Some(i)) => {
                         loc_idx = i;
                         step = 4;
@@ -1001,7 +1025,7 @@ pub async fn run_wizard() -> Result<Option<PathBuf>> {
                 match read_selection(&[
                     ("No, I'm done", ""),
                     ("Yes, add another", ""),
-                ], SELECTION_HINT, None) {
+                ], SELECTION_HINT, None, None::<fn()>) {
                     Ok(Some(0)) => break,
                     Ok(Some(_)) => {
                         // Reset wizard state for next proxy; go back to step 1
