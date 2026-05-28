@@ -13,6 +13,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 mod demo;
 mod cli;
+mod wizard;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -120,10 +121,11 @@ fn load_config(config_override: Option<PathBuf>) -> Result<(Config, PathBuf, Pat
     anyhow::bail!("config not found. Create ocular.toml in current directory or ~/.config/ocular/ocular.toml, or use --config <path>")
 }
 
-fn validate_config(config: &Config) -> Result<()> {
+fn validate_config(config: &Config) -> Result<Vec<String>> {
     use std::collections::HashSet;
     let mut capture_remotes: HashSet<&str> = HashSet::new();
     let mut proxy_remotes: HashSet<&str> = HashSet::new();
+    let mut warnings = Vec::new();
 
     for p in &config.proxy {
         match p.mode {
@@ -144,13 +146,13 @@ fn validate_config(config: &Config) -> Result<()> {
 
     for remote in &capture_remotes {
         if proxy_remotes.contains(remote) {
-            anyhow::bail!(
-                "remote '{}' is configured in both proxy and capture mode — this would produce duplicate events",
+            warnings.push(format!(
+                "remote '{}' is configured in both proxy and capture mode — this will produce duplicate events",
                 remote
-            );
+            ));
         }
     }
-    Ok(())
+    Ok(warnings)
 }
 
 fn print_help() {
@@ -164,11 +166,14 @@ fn print_help() {
     println!();
     println!("{h}USAGE:{r}");
     println!("  {c}ocular{r}                         Launch TUI dashboard");
+    println!("  {c}ocular setup{r}                   Interactive setup wizard (first-time config)");
     println!("  {c}ocular proxy{r} <proto> [remote]   Proxy mode (terminal output)");
     println!("  {c}ocular capture{r} <proto> [remote] Capture mode (terminal output)");
     println!("  {c}ocular --demo{r}                   Demo mode with simulated traffic");
     println!();
     println!("{h}SUBCOMMANDS:{r}");
+    println!("  {c}setup{r}    Interactive wizard to generate ocular.toml");
+    println!("  {c}init{r}     Alias for setup");
     println!("  {c}proxy{r}    Start a TCP proxy and print events to terminal");
     println!("  {c}capture{r}  Passively capture traffic (requires BPF permissions)");
     println!("  {c}cap{r}      Alias for capture");
@@ -366,6 +371,15 @@ async fn main() -> Result<()> {
         return cli::run_cli(cli_args).await;
     }
 
+    // Setup wizard: interactive config generation
+    if args.len() >= 2 && matches!(args[1].as_str(), "setup" | "init") {
+        match wizard::run_wizard().await? {
+            Some(_) => println!("\nSetup complete! Run `ocular` to launch the dashboard."),
+            None => println!("\nSetup cancelled."),
+        }
+        return Ok(());
+    }
+
     // Extract --config / -c for TUI mode (must be after subcommand check to avoid
     // consuming flags meant for the subcommand path)
     let config_override = {
@@ -390,11 +404,30 @@ async fn main() -> Result<()> {
         let theme = ocular_tui::Theme::by_name("tokyo-night-storm");
         let config_path = PathBuf::from("ocular.toml");
         let demo_status: ocular_proxy::StatusMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        return ocular_tui::run(rx, components, theme, config_path.clone(), None, true, false, None, None, None, None, config_path, demo_status, true).await;
+        return ocular_tui::run(rx, components, theme, config_path.clone(), None, true, false, None, None, None, None, config_path, demo_status, true, false).await;
     }
 
-    let (config, config_dir, config_path) = load_config(config_override)?;
-    validate_config(&config)?;
+    let (config, config_dir, config_path, from_wizard) = match load_config(config_override.clone()) {
+        Ok(result) => (result.0, result.1, result.2, false),
+        Err(_) if config_override.is_none() => {
+            // No config found and no explicit --config → launch setup wizard
+            match wizard::run_wizard().await? {
+                Some(_) => {
+                    let result = load_config(None)?;
+                    (result.0, result.1, result.2, true)
+                }
+                None => {
+                    println!("\nNo config found. Run `ocular setup` to create one, or `ocular --demo` to try it out.");
+                    return Ok(());
+                }
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    let warnings = validate_config(&config)?;
+    for w in &warnings {
+        eprintln!("\x1b[33m⚠ {}\x1b[0m", w);
+    }
     init_tracing(&config_dir);
     info!(proxies = config.proxy.len(), config_dir = %config_dir.display(), "ocular starting");
 
@@ -439,11 +472,19 @@ async fn main() -> Result<()> {
     let (proxy_change_tx, proxy_change_rx) = broadcast::channel::<ProxyChange>(64);
     let status_map: ocular_proxy::StatusMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
-    // Don't spawn proxies at startup — wait for user to select a group in Dashboard
-    let proxy_handles: HashMap<String, ProxyHandle> = HashMap::new();
+    // Pre-spawn proxies if coming from wizard (skip dashboard); otherwise wait for group selection
+    let mut proxy_handles: HashMap<String, ProxyHandle> = HashMap::new();
+    if from_wizard {
+        for proxy_cfg in &active_proxies {
+            let ph = spawn_proxy(proxy_cfg, &tx, status_map.clone());
+            proxy_handles.insert(proxy_cfg.name.clone(), ph);
+            info!(component = %proxy_cfg.name, "proxy started (wizard mode)");
+        }
+    }
 
     // Proxy hot-reload watcher task
     let _config_path_watch = active_config_path.clone();
+    let _watch_path_initial = if from_wizard { Some(active_config_path.clone()) } else { None };
     let tx_reload = tx.clone();
     let proxy_change_tx_clone = proxy_change_tx.clone();
     let initial_excludes = config.exclude.clone();
@@ -454,7 +495,7 @@ async fn main() -> Result<()> {
         let mut handles = proxy_handles;
         #[allow(unused_assignments)]
         let mut global_excludes: std::collections::HashMap<String, ExcludeConfig> = initial_excludes;
-        let mut watch_path: Option<PathBuf> = None; // No watching until a group is loaded
+        let mut watch_path: Option<PathBuf> = _watch_path_initial;
         let mut change_rx = proxy_change_tx_clone.subscribe();
         loop {
             tokio::select! {
@@ -572,5 +613,5 @@ async fn main() -> Result<()> {
         base_theme
     };
 
-    ocular_tui::run(rx, components, theme, active_config_path, config.event_format, config.leader_menu, config.quit_confirm, Some(proxy_change_rx), Some(group_dir), active_group, Some(proxy_change_tx), config_path, status_map, false).await
+    ocular_tui::run(rx, components, theme, active_config_path, config.event_format, config.leader_menu, config.quit_confirm, Some(proxy_change_rx), Some(group_dir), active_group, Some(proxy_change_tx), config_path, status_map, false, from_wizard).await
 }

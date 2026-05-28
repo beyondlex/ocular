@@ -134,8 +134,8 @@ Skip the dashboard and output events directly to the terminal. Ideal for scripti
 ```bash
 # Proxy mode — auto-assigns listen port (3306 + 10000 = 13306)
 ocular proxy mysql 192.168.0.184
-# ↳ equivalent: ocular proxy mysql 192.168.0.184:3306 -l 127.0.0.1:13306
-# Starts a proxy on localhost:13306 forwarding to the remote MySQL server.
+# ↳ equivalent: ocular proxy mysql 192.168.0.184:3306 -l 0.0.0.0:13306
+# Starts a proxy on all interfaces port 13306 forwarding to the remote MySQL server.
 
 # Capture mode — passive sniffing, no connection changes
 sudo ocular capture mysql 192.168.0.184
@@ -146,7 +146,7 @@ sudo ocular capture mysql 192.168.0.184
 
 # Minimal — defaults to 127.0.0.1 with protocol's default port
 ocular proxy redis
-# ↳ equivalent: ocular proxy redis 127.0.0.1:6379 -l 127.0.0.1:16379
+# ↳ equivalent: ocular proxy redis 127.0.0.1:6379 -l 0.0.0.0:16379
 # Proxies local Redis traffic, listening on port 16379.
 
 # JSON output (one object per line, for programmatic parsing)
@@ -162,8 +162,8 @@ ocular proxy mysql 192.168.0.184 --raw >> events.log
 # Override interface or listen address
 sudo ocular cap mysql 192.168.0.184 -i en0
 # ↳ `cap` is short for `capture`. Captures MySQL traffic on the en0 interface.
-ocular proxy postgres 10.0.0.5 -l 127.0.0.1:25432
-# ↳ equivalent: ocular proxy postgres 10.0.0.5:5432 -l 127.0.0.1:25432
+ocular proxy postgres 10.0.0.5 -l :25432
+# ↳ equivalent: ocular proxy postgres 10.0.0.5:5432 -l 0.0.0.0:25432
 # Proxies remote Postgres with a custom listen port.
 ```
 
@@ -179,7 +179,8 @@ ocular proxy postgres 10.0.0.5 -l 127.0.0.1:25432
 | `--color` | Force colored output |
 | `--tui`, `-t` | Launch minimal TUI preview (no component pane, full features) |
 | `-i`, `--interface` | Network interface for capture mode |
-| `-l`, `--listen` | Listen address for proxy mode (default: auto) |
+| `-l`, `--listen` | Listen address (default: 0.0.0.0:<remote_port+10000>, `:port` shorthand) |
+| `-c`, `--config` | Path to config file (default: auto-detect) |
 
 Default ports: redis=6379, mysql=3306, postgres=5432, amqp=5672, mongodb=27017, http=9200, memcached=11211, kafka=9092
 
@@ -288,7 +289,10 @@ Ocular looks for `ocular.toml` in the following order:
 
 1. `./ocular.toml` (current directory)
 2. `$XDG_CONFIG_HOME/ocular/ocular.toml`
-3. `~/.config/ocular/ocular.toml`
+3. `~/.config/ocular/ocular.toml` (via `dirs::config_dir()`)
+4. `$HOME/.config/ocular/ocular.toml`
+5. `SUDO_USER`'s home `~/.config/ocular/ocular.toml` (when running under sudo)
+6. Override with `-c, --config <path>`
 
 Multiple instances of the same protocol are supported — just use different names and ports:
 

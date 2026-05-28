@@ -640,6 +640,7 @@ pub async fn run(
     main_config_path: PathBuf,
     status_map: StatusMap,
     preview: bool,
+    skip_dashboard: bool,
 ) -> Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -658,7 +659,7 @@ pub async fn run(
         selected: 0,
         detail_scroll: 0,
         focus: Focus::Events,
-        components: if preview { components.clone() } else { Vec::new() }, // preview: pre-populate; normal: wait for group selection
+        components: if preview || skip_dashboard { components.clone() } else { Vec::new() }, // pre-populate for preview or skip-dashboard; normal: wait for group selection
         component_idx: None,
         filter: String::new(),
         pending_keys: String::new(),
@@ -686,7 +687,7 @@ pub async fn run(
         active_group,
         group_picker: None,
         proxy_change_tx,
-        mode: if preview { AppMode::Main } else { AppMode::Dashboard },
+        mode: if preview || skip_dashboard { AppMode::Main } else { AppMode::Dashboard },
         dashboard: DashboardState::load(
             app_group_dir.as_deref().unwrap_or(std::path::Path::new("")),
             &main_config_path,
@@ -1419,6 +1420,7 @@ pub async fn run(
                         KeyCode::Esc | KeyCode::Char('?') => { app.help_active = false; }
                         _ => {}
                     }
+                    app.dirty = true;
                     continue;
                 }
 
@@ -1436,6 +1438,7 @@ pub async fn run(
                         }
                         _ => { app.confirm_quit = false; }
                     }
+                    app.dirty = true;
                     continue;
                 }
 
@@ -1491,6 +1494,7 @@ pub async fn run(
                         }
                         _ => {}
                     }
+                    app.dirty = true;
                     continue;
                 }
 
