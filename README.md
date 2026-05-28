@@ -32,15 +32,32 @@ So I built Ocular. Point your app's connections through it, click the button, an
 
 ## Quick Start
 
-```bash
-# Install
-brew tap beyondlex/tap && brew install ocular
-# or: cargo install ocular-cli
-# or: curl -fsSL https://raw.githubusercontent.com/beyondlex/ocular/main/install.sh | sh
+### Install
 
-# Try it instantly — no services needed
+#### Homebrew
+
+```bash
+brew tap beyondlex/tap && brew install ocular
+```
+
+#### Cargo
+
+```bash
+cargo install ocular-cli
+```
+
+#### Shell
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/beyondlex/ocular/main/install.sh | sh
+```
+
+Try it instantly — no services needed
+
+```bash
 ocular --demo
 ```
+
 
 ### With real services
 

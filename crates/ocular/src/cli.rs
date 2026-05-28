@@ -81,6 +81,9 @@ pub fn parse_cli_args(args: &[String]) -> Result<CliArgs> {
                 i += 1;
                 listen = Some(args.get(i).cloned().ok_or_else(|| anyhow::anyhow!("--listen requires a value"))?);
             }
+            "-c" | "--config" => {
+                i += 1; // skip value, handled by main()
+            }
             other => bail!("unknown option: {}", other),
         }
         i += 1;
@@ -100,7 +103,8 @@ fn print_usage(subcmd: &str) {
     eprintln!("  --color             Force colored output");
     eprintln!("  --tui, -t           Launch minimal TUI preview");
     eprintln!("  -i, --interface     Network interface (capture mode)");
-    eprintln!("  -l, --listen        Listen address (proxy mode, default: auto)");
+    eprintln!("  -l, --listen        Listen address (proxy mode, default: 0.0.0.0:<remote_port+10000>)");
+    eprintln!("  -c, --config        Path to config file (default: auto-detect)");
     eprintln!();
     eprintln!("Port defaults: redis=6379, mysql=3306, postgres=5432, amqp=5672,");
     eprintln!("              mongodb=27017, http=9200, memcached=11211, kafka=9092");
@@ -137,13 +141,13 @@ fn resolve_listen_addr(remote: &str) -> Result<String> {
         .and_then(|p| p.parse().ok())
         .ok_or_else(|| anyhow::anyhow!("cannot parse port from remote: {}", remote))?;
     let preferred = port.wrapping_add(10000);
-    let addr = format!("127.0.0.1:{}", preferred);
+    let addr = format!("0.0.0.0:{}", preferred);
     // Try binding to check availability
     match std::net::TcpListener::bind(&addr) {
         Ok(_) => Ok(addr),
         Err(_) => {
             // Fallback: OS-assigned port
-            let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+            let listener = std::net::TcpListener::bind("0.0.0.0:0")?;
             let actual = listener.local_addr()?;
             Ok(actual.to_string())
         }
@@ -260,6 +264,12 @@ pub async fn run_cli(args: CliArgs) -> Result<()> {
             let listen = match args.listen {
                 Some(ref l) => l.clone(),
                 None => resolve_listen_addr(&args.remote)?,
+            };
+            // Normalize ":port" shorthand → "0.0.0.0:port" (listen is local, not remote)
+            let listen = if listen.starts_with(':') {
+                format!("0.0.0.0{}", listen)
+            } else {
+                listen
             };
             if !args.tui {
                 eprintln!("Proxying {:?} on {} → {}", args.protocol, listen, args.remote);

@@ -90,13 +90,24 @@ struct ProxyHandle {
 /// Notification sent to TUI when proxies change
 pub use ocular_tui::ProxyChange;
 
-fn load_config() -> Result<(Config, PathBuf, PathBuf)> {
-    let candidates = [
-        Some(PathBuf::from("ocular.toml")),
-        std::env::var("XDG_CONFIG_HOME").ok().map(|d| PathBuf::from(d).join("ocular/ocular.toml")),
-        dirs::config_dir().map(|d| d.join("ocular/ocular.toml")),
-        std::env::var("HOME").ok().map(|d| PathBuf::from(d).join(".config/ocular/ocular.toml")),
-    ];
+fn load_config(config_override: Option<PathBuf>) -> Result<(Config, PathBuf, PathBuf)> {
+    let candidates = match config_override {
+        Some(path) => vec![Some(path)],
+        None => vec![
+            Some(PathBuf::from("ocular.toml")),
+            std::env::var("XDG_CONFIG_HOME").ok().map(|d| PathBuf::from(d).join("ocular/ocular.toml")),
+            dirs::config_dir().map(|d| d.join("ocular/ocular.toml")),
+            std::env::var("HOME").ok().map(|d| PathBuf::from(d).join(".config/ocular/ocular.toml")),
+            std::env::var("SUDO_USER").ok().and_then(|user| {
+                let home = if cfg!(target_os = "macos") {
+                    PathBuf::from("/Users").join(&user)
+                } else {
+                    PathBuf::from("/home").join(&user)
+                };
+                Some(home.join(".config/ocular/ocular.toml"))
+            }),
+        ],
+    };
     for candidate in candidates.iter().flatten() {
         if candidate.exists() {
             let config_dir = candidate.parent().unwrap_or(std::path::Path::new(".")).to_path_buf();
@@ -106,7 +117,7 @@ fn load_config() -> Result<(Config, PathBuf, PathBuf)> {
             return Ok((config, config_dir, candidate.clone()));
         }
     }
-    anyhow::bail!("config not found. Create ocular.toml in current directory or ~/.config/ocular/ocular.toml")
+    anyhow::bail!("config not found. Create ocular.toml in current directory or ~/.config/ocular/ocular.toml, or use --config <path>")
 }
 
 fn validate_config(config: &Config) -> Result<()> {
@@ -174,17 +185,19 @@ fn print_help() {
     println!("  {c}-i, --interface{r}  Network interface for capture mode");
     println!("  {c}-l, --listen{r}     Listen address for proxy mode");
     println!("  {c}-v, --version{r}    Print version");
+    println!("  {c}-c, --config{r}     Path to config file (default: auto-detect)");
     println!("  {c}-h, --help{r}       Print this help");
     println!();
     println!("{h}SHORTHAND EXAMPLES:{r}");
-    println!("  {c}ocular proxy redis{r}              {d}→ proxy redis 127.0.0.1:6379, listen 127.0.0.1:16379{r}");
-    println!("  {c}ocular proxy mysql 10.0.0.5{r}     {d}→ proxy mysql 10.0.0.5:3306, listen 127.0.0.1:13306{r}");
+    println!("  {c}ocular proxy redis{r}              {d}→ proxy redis 127.0.0.1:6379, listen 0.0.0.0:16379{r}");
+    println!("  {c}ocular proxy mysql 10.0.0.5{r}     {d}→ proxy mysql 10.0.0.5:3306, listen 0.0.0.0:13306{r}");
     println!("  {c}ocular cap mysql 10.0.0.5{r}       {d}→ capture mysql 10.0.0.5:3306 on en0 (auto-detected){r}");
     println!();
     println!("{h}PORT AUTO-ASSIGNMENT (proxy mode):{r}");
     println!("  Listen port = remote port + 10000 (e.g. 3306 → 13306, 6379 → 16379)");
     println!("  If the port is occupied, a random available port is used instead.");
-    println!("  Override with {c}-l{r}: {c}ocular proxy mysql -l 127.0.0.1:23306{r}");
+    println!("  Override with {c}-l{r}: {c}ocular proxy mysql -l 0.0.0.0:23306{r}");
+    println!("  Or shorthand (uses remote host): {c}ocular proxy mysql -l :23306{r}");
     println!();
     println!("{h}INTERFACE AUTO-DETECTION (capture mode):{r}");
     println!("  Remote is 127.x/localhost → loopback (lo0 on macOS, lo on Linux)");
@@ -347,6 +360,29 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // CLI subcommands: capture/cap/proxy — skip TUI, output to terminal
+    if args.len() >= 2 && matches!(args[1].as_str(), "capture" | "cap" | "proxy") {
+        let cli_args = cli::parse_cli_args(&args)?;
+        return cli::run_cli(cli_args).await;
+    }
+
+    // Extract --config / -c for TUI mode (must be after subcommand check to avoid
+    // consuming flags meant for the subcommand path)
+    let config_override = {
+        let mut i = 1;
+        let mut found = None;
+        while i < args.len() {
+            if args[i] == "--config" || args[i] == "-c" {
+                if i + 1 < args.len() {
+                    found = Some(PathBuf::from(&args[i + 1]));
+                    break;
+                }
+            }
+            i += 1;
+        }
+        found
+    };
+
     if args.iter().any(|a| a == "--demo") {
         let (tx, _) = broadcast::channel::<ocular_proxy::ProxyEvent>(1024);
         let tx2 = tx.clone();
@@ -359,13 +395,7 @@ async fn main() -> Result<()> {
         return ocular_tui::run(rx, components, theme, config_path.clone(), None, true, false, None, None, None, None, config_path, demo_status, true).await;
     }
 
-    // CLI subcommands: capture/cap/proxy — skip TUI, output to terminal
-    if args.len() >= 2 && matches!(args[1].as_str(), "capture" | "cap" | "proxy") {
-        let cli_args = cli::parse_cli_args(&args)?;
-        return cli::run_cli(cli_args).await;
-    }
-
-    let (config, config_dir, config_path) = load_config()?;
+    let (config, config_dir, config_path) = load_config(config_override)?;
     validate_config(&config)?;
     init_tracing(&config_dir);
     info!(proxies = config.proxy.len(), config_dir = %config_dir.display(), "ocular starting");
