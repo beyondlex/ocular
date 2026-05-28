@@ -2259,7 +2259,7 @@ fn ui(f: &mut Frame, app: &mut App) {
 
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Horizontal)
-        .constraints(if app.preview {
+        .constraints(if app.preview && app.components.len() <= 1 {
             [Constraint::Length(0), Constraint::Min(0)]
         } else {
             [Constraint::Length(28), Constraint::Min(0)]
