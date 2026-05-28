@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.13.0 (2026-05-28)
+
+### New Features
+- **Interactive setup wizard** — `ocular setup` or auto-launched when no config exists
+  - 7-step guided flow: mode → protocol → location → address → connectivity → confirm → add more
+  - Arrow-key navigation with Esc to go back, breadcrumb trail shows progress
+  - Async TCP connectivity check with protocol-specific troubleshooting hints
+  - Warns on duplicate remotes in different modes (instead of bailing)
+  - Config written to `~/.config/ocular/ocular.toml` with overwrite protection
+  - Pre-spawns proxies after wizard, skips dashboard, enters main TUI directly
+- **Help popup in wizard** — press `?` on mode selection to see ASCII diagram explaining Proxy vs Capture
+  - Shows network topology, port relationships, SSL visibility differences
+  - Dismiss with `?` or `Esc`
+
+### Bug Fixes
+- **Wizard help popup screen corruption** — clear full screen before/after overlay and toggle raw mode around re-render to prevent layout drift
+
+## v0.12.0 (2026-05-28)
+
+### New Features
+- **`--demo` skips dashboard** — goes directly to main view with simulated traffic
+- **Config override** — `-c, --config <path>` flag to specify config file location
+- **`SUDO_USER` config fallback** — finds user config when running under `sudo`
+- **`0.0.0.0` listen default** — CLI proxy listens on all interfaces by default
+
 ## v0.11.0 (2026-05-27)
 
 ### New Features
