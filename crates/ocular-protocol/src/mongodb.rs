@@ -271,221 +271,135 @@ fn read_cstr(buf: &[u8]) -> Option<String> {
     Some(String::from_utf8_lossy(&buf[..end]).to_string())
 }
 
-/// Get a string field value from a BSON document.
+// ─── BSON field iterator ────────────────────────────────────────────────────
+
+/// Iterates over fields in a BSON document, yielding `(type, key, value_pos)`
+/// for each element. Centralizes the skip-value logic that was previously
+/// duplicated across get_string_field, get_f64_field, get_i32_field,
+/// get_raw_doc_field, and has_field.
+struct BsonIter<'a> {
+    doc: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> BsonIter<'a> {
+    fn new(doc: &'a [u8]) -> Self {
+        Self { doc, pos: 4 } // skip 4-byte document size
+    }
+}
+
+impl<'a> Iterator for BsonIter<'a> {
+    type Item = (u8, &'a str, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos >= self.doc.len().saturating_sub(1) { return None; }
+        let etype = self.doc[self.pos];
+        if etype == 0 { return None; }
+        self.pos += 1;
+        // Read key as &str (no allocation)
+        let key_end = self.doc[self.pos..].iter().position(|&b| b == 0)?;
+        let key = std::str::from_utf8(&self.doc[self.pos..self.pos + key_end]).ok()?;
+        self.pos += key_end + 1;
+        let value_pos = self.pos;
+        if !bson_skip_value(self.doc, etype, &mut self.pos) {
+            return None; // unknown type or out-of-bounds — bail
+        }
+        Some((etype, key, value_pos))
+    }
+}
+
+/// Advance `pos` past a BSON value of the given type. Returns false on error.
+fn bson_skip_value(doc: &[u8], etype: u8, pos: &mut usize) -> bool {
+    match etype {
+        0x01 => { *pos += 8; }                              // double
+        0x02 => {                                            // string: len(4) + data
+            if *pos + 4 > doc.len() { return false; }
+            let slen = i32::from_le_bytes([doc[*pos], doc[*pos+1], doc[*pos+2], doc[*pos+3]]) as usize;
+            *pos += 4 + slen;
+        }
+        0x03 | 0x04 => {                                     // document / array: self-describing length
+            if *pos + 4 > doc.len() { return false; }
+            let dlen = i32::from_le_bytes([doc[*pos], doc[*pos+1], doc[*pos+2], doc[*pos+3]]) as usize;
+            *pos += dlen;
+        }
+        0x05 => {                                            // binary: len(4) + subtype(1) + data
+            if *pos + 4 > doc.len() { return false; }
+            let blen = i32::from_le_bytes([doc[*pos], doc[*pos+1], doc[*pos+2], doc[*pos+3]]) as usize;
+            *pos += 5 + blen;
+        }
+        0x07 => { *pos += 12; }                              // ObjectId
+        0x08 => { *pos += 1; }                               // boolean
+        0x09 | 0x11 | 0x12 => { *pos += 8; }                 // datetime, timestamp, int64
+        0x0A => {}                                            // null
+        0x10 => { *pos += 4; }                               // int32
+        0x13 => { *pos += 16; }                              // decimal128
+        _ => { return false; }                                // unknown type
+    }
+    true
+}
+
 fn get_string_field(doc: &[u8], name: &str) -> Option<String> {
-    let mut pos = 4; // skip doc size
-    while pos < doc.len() - 1 {
-        let etype = doc[pos];
-        if etype == 0 { break; } // end of doc
-        pos += 1;
-        let key = read_cstr(&doc[pos..])?;
-        pos += key.len() + 1;
-        match etype {
-            0x02 => { // string
-                if pos + 4 > doc.len() { return None; }
-                let slen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize;
-                pos += 4;
-                if key == name {
-                    let s = String::from_utf8_lossy(&doc[pos..pos+slen.saturating_sub(1)]).to_string();
-                    return Some(s);
-                }
-                pos += slen;
-            }
-            0x01 => { pos += 8; } // double
-            0x03 | 0x04 => { // document or array
-                if pos + 4 > doc.len() { return None; }
-                let dlen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize;
-                pos += dlen;
-            }
-            0x05 => { // binary
-                if pos + 4 > doc.len() { return None; }
-                let blen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize;
-                pos += 5 + blen;
-            }
-            0x07 => { pos += 12; } // ObjectId
-            0x08 => { pos += 1; } // boolean
-            0x09 | 0x11 | 0x12 => { pos += 8; } // datetime, timestamp, int64
-            0x0A => {} // null
-            0x10 => { pos += 4; } // int32
-            0x13 => { pos += 16; } // decimal128
-            _ => { return None; } // unknown type, bail
+    for (etype, key, pos) in BsonIter::new(doc) {
+        if key == name && etype == 0x02 {
+            let slen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize;
+            return Some(String::from_utf8_lossy(&doc[pos+4..pos+4+slen.saturating_sub(1)]).to_string());
         }
     }
     None
 }
 
 fn get_f64_field(doc: &[u8], name: &str) -> Option<f64> {
-    let mut pos = 4;
-    while pos < doc.len() - 1 {
-        let etype = doc[pos];
-        if etype == 0 { break; }
-        pos += 1;
-        let key = read_cstr(&doc[pos..])?;
-        pos += key.len() + 1;
-        match etype {
-            0x01 => {
-                if key == name && pos + 8 <= doc.len() {
-                    return Some(f64::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3], doc[pos+4], doc[pos+5], doc[pos+6], doc[pos+7]]));
-                }
-                pos += 8;
-            }
-            0x10 => {
-                if key == name && pos + 4 <= doc.len() {
+    for (etype, key, pos) in BsonIter::new(doc) {
+        if key == name {
+            match etype {
+                0x01 => return Some(f64::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3], doc[pos+4], doc[pos+5], doc[pos+6], doc[pos+7]])),
+                0x10 => {
                     let v = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]);
                     return Some(v as f64);
                 }
-                pos += 4;
+                _ => {}
             }
-            0x02 => { if pos + 4 > doc.len() { return None; } let slen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += 4 + slen; }
-            0x03 | 0x04 => { if pos + 4 > doc.len() { return None; } let dlen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += dlen; }
-            0x05 => { if pos + 4 > doc.len() { return None; } let blen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += 5 + blen; }
-            0x07 => { pos += 12; }
-            0x08 => { pos += 1; }
-            0x09 | 0x11 | 0x12 => { pos += 8; }
-            0x0A => {}
-            0x13 => { pos += 16; }
-            _ => { return None; }
         }
     }
     None
 }
 
 fn get_i32_field(doc: &[u8], name: &str) -> Option<i32> {
-    let mut pos = 4;
-    while pos < doc.len() - 1 {
-        let etype = doc[pos];
-        if etype == 0 { break; }
-        pos += 1;
-        let key = read_cstr(&doc[pos..])?;
-        pos += key.len() + 1;
-        match etype {
-            0x10 => {
-                if key == name && pos + 4 <= doc.len() {
-                    return Some(i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]));
-                }
-                pos += 4;
-            }
-            0x01 => { pos += 8; }
-            0x02 => { if pos + 4 > doc.len() { return None; } let slen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += 4 + slen; }
-            0x03 | 0x04 => { if pos + 4 > doc.len() { return None; } let dlen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += dlen; }
-            0x05 => { if pos + 4 > doc.len() { return None; } let blen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += 5 + blen; }
-            0x07 => { pos += 12; }
-            0x08 => { pos += 1; }
-            0x09 | 0x11 | 0x12 => { pos += 8; }
-            0x0A => {}
-            0x13 => { pos += 16; }
-            _ => { return None; }
+    for (etype, key, pos) in BsonIter::new(doc) {
+        if key == name && etype == 0x10 {
+            return Some(i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]));
         }
     }
     None
 }
 
 fn get_raw_doc_field(doc: &[u8], name: &str) -> Option<Vec<u8>> {
-    let mut pos = 4;
-    while pos < doc.len() - 1 {
-        let etype = doc[pos];
-        if etype == 0 { break; }
-        pos += 1;
-        let key = read_cstr(&doc[pos..])?;
-        pos += key.len() + 1;
-        match etype {
-            0x03 | 0x04 => {
-                if pos + 4 > doc.len() { return None; }
-                let dlen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize;
-                if key == name {
-                    return Some(doc[pos..pos+dlen].to_vec());
-                }
-                pos += dlen;
-            }
-            0x01 => { pos += 8; }
-            0x02 => { if pos + 4 > doc.len() { return None; } let slen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += 4 + slen; }
-            0x05 => { if pos + 4 > doc.len() { return None; } let blen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += 5 + blen; }
-            0x07 => { pos += 12; }
-            0x08 => { pos += 1; }
-            0x09 | 0x10 | 0x11 | 0x12 => { pos += if etype == 0x10 { 4 } else { 8 }; }
-            0x0A => {}
-            0x13 => { pos += 16; }
-            _ => { return None; }
+    for (etype, key, pos) in BsonIter::new(doc) {
+        if key == name && (etype == 0x03 || etype == 0x04) {
+            let dlen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize;
+            return Some(doc[pos..pos+dlen].to_vec());
         }
     }
     None
 }
 
 fn has_field(doc: &[u8], name: &str) -> bool {
-    let mut pos = 4;
-    while pos < doc.len().saturating_sub(1) {
-        let etype = doc[pos];
-        if etype == 0 { break; }
-        pos += 1;
-        let Some(key) = read_cstr(&doc[pos..]) else { break };
-        if key == name { return true; }
-        pos += key.len() + 1;
-        match etype {
-            0x01 => { pos += 8; }
-            0x02 => { if pos + 4 > doc.len() { break; } let slen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += 4 + slen; }
-            0x03 | 0x04 => { if pos + 4 > doc.len() { break; } let dlen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += dlen; }
-            0x05 => { if pos + 4 > doc.len() { break; } let blen = i32::from_le_bytes([doc[pos], doc[pos+1], doc[pos+2], doc[pos+3]]) as usize; pos += 5 + blen; }
-            0x07 => { pos += 12; }
-            0x08 => { pos += 1; }
-            0x09 | 0x11 | 0x12 => { pos += 8; }
-            0x0A => {}
-            0x10 => { pos += 4; }
-            0x13 => { pos += 16; }
-            _ => { break; }
-        }
-    }
-    false
+    BsonIter::new(doc).any(|(_, key, _)| key == name)
 }
 
 fn get_array_len(doc: &[u8], name: &str) -> usize {
     let Some(arr) = get_raw_doc_field(doc, name) else { return 0 };
-    // BSON array is a document with "0", "1", ... keys
-    let mut count = 0;
-    let mut pos = 4;
-    while pos < arr.len().saturating_sub(1) {
-        if arr[pos] == 0 { break; }
-        count += 1;
-        pos += 1;
-        let Some(key) = read_cstr(&arr[pos..]) else { break };
-        pos += key.len() + 1;
-        // skip value based on type
-        let etype = arr[pos - key.len() - 2];
-        match etype {
-            0x01 => { pos += 8; }
-            0x02 => { if pos + 4 > arr.len() { break; } let slen = i32::from_le_bytes([arr[pos], arr[pos+1], arr[pos+2], arr[pos+3]]) as usize; pos += 4 + slen; }
-            0x03 | 0x04 => { if pos + 4 > arr.len() { break; } let dlen = i32::from_le_bytes([arr[pos], arr[pos+1], arr[pos+2], arr[pos+3]]) as usize; pos += dlen; }
-            0x05 => { if pos + 4 > arr.len() { break; } let blen = i32::from_le_bytes([arr[pos], arr[pos+1], arr[pos+2], arr[pos+3]]) as usize; pos += 5 + blen; }
-            0x07 => { pos += 12; }
-            0x08 => { pos += 1; }
-            0x09 | 0x11 | 0x12 => { pos += 8; }
-            0x0A => {}
-            0x10 => { pos += 4; }
-            0x13 => { pos += 16; }
-            _ => { break; }
-        }
-    }
-    count
+    BsonIter::new(&arr).count()
 }
 
 fn get_array_docs(doc: &[u8], name: &str) -> Vec<Vec<u8>> {
     let Some(arr) = get_raw_doc_field(doc, name) else { return vec![] };
     let mut docs = Vec::new();
-    let mut pos = 4;
-    while pos < arr.len().saturating_sub(1) {
-        let etype = arr[pos];
-        if etype == 0 { break; }
-        pos += 1;
-        let Some(key) = read_cstr(&arr[pos..]) else { break };
-        pos += key.len() + 1;
-        if etype == 0x03 {
-            if pos + 4 > arr.len() { break; }
-            let dlen = i32::from_le_bytes([arr[pos], arr[pos+1], arr[pos+2], arr[pos+3]]) as usize;
-            if pos + dlen <= arr.len() {
-                docs.push(arr[pos..pos+dlen].to_vec());
-            }
-            pos += dlen;
-        } else {
-            break; // unexpected type in result array
+    for (etype, _key, pos) in BsonIter::new(&arr) {
+        if etype != 0x03 { continue; }
+        let dlen = i32::from_le_bytes([arr[pos], arr[pos+1], arr[pos+2], arr[pos+3]]) as usize;
+        if pos + dlen <= arr.len() {
+            docs.push(arr[pos..pos+dlen].to_vec());
         }
     }
     docs
