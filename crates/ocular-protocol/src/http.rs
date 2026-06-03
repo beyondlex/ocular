@@ -63,7 +63,12 @@ pub fn format_http_response_detail(buf: &[u8]) -> Option<String> {
     let mut result = first_line.to_string();
 
     if let Some(header_end) = s.find("\r\n\r\n") {
-        let headers = &s[first_line.len() + 2..header_end];
+        let headers_start = first_line.len() + 2;
+        let headers = if headers_start <= header_end {
+            &s[headers_start..header_end]
+        } else {
+            ""
+        };
         if !headers.is_empty() {
             result.push_str("\n\n[Response Headers]\n");
             result.push_str(headers.replace("\r\n", "\n").trim());
@@ -285,5 +290,74 @@ mod tests {
         let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
         let detail = format_http_response_detail(resp).unwrap();
         assert!(detail.contains("hello world"));
+    }
+
+    // ─── Edge case tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_incomplete_request_line() {
+        // "GET /" is actually valid (method + path)
+        assert!(parse_http_request(b"GET /").is_some());
+        assert!(parse_http_request(b"").is_none());
+        assert!(parse_http_request(b"GET").is_none()); // missing path
+    }
+
+    #[test]
+    fn test_incomplete_headers() {
+        assert!(!http_request_complete(b"POST / HTTP/1.1\r\nContent-Length: 5\r\n"));
+        assert!(!http_response_complete(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"));
+    }
+
+    #[test]
+    fn test_no_content_length_no_body() {
+        // GET without Content-Length is complete after headers
+        let req = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert!(http_request_complete(req));
+    }
+
+    #[test]
+    fn test_chunked_incomplete_terminator() {
+        // Missing final 0\r\n\r\n
+        let resp = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n";
+        assert!(!http_response_complete(resp));
+    }
+
+    #[test]
+    fn test_response_detail_no_body() {
+        let resp = b"HTTP/1.1 204 No Content\r\n\r\n";
+        let detail = format_http_response_detail(resp).unwrap();
+        assert!(detail.contains("204"));
+    }
+
+    #[test]
+    fn test_request_put_with_body() {
+        let req = b"PUT /doc/1 HTTP/1.1\r\nContent-Length: 7\r\n\r\n{\"a\":1}";
+        assert_eq!(parse_http_request(req), Some("PUT /doc/1".into()));
+        assert!(http_request_complete(req));
+    }
+
+    #[test]
+    fn test_request_delete() {
+        let req = b"DELETE /index HTTP/1.1\r\nHost: x\r\n\r\n";
+        assert_eq!(parse_http_request(req), Some("DELETE /index".into()));
+        assert!(http_request_complete(req));
+    }
+
+    #[test]
+    fn test_extract_full_no_body() {
+        let req = b"GET /test HTTP/1.1\r\nHost: x\r\n\r\n";
+        let full = extract_http_full_command(req).unwrap();
+        assert_eq!(full, "GET /test");
+    }
+
+    #[test]
+    fn test_response_500() {
+        let resp = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(parse_http_response(resp), Some("500 Internal Server Error".into()));
+    }
+
+    #[test]
+    fn test_non_utf8_rejected() {
+        assert!(parse_http_request(&[0xFF, 0xFE, 0xFD]).is_none());
     }
 }

@@ -346,6 +346,141 @@ mod tests {
         let resp = parse_mysql_response(&pkt).unwrap();
         assert!(matches!(resp, MysqlResponse::Ok { .. }));
     }
+
+    // ─── Edge case tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_incomplete_header() {
+        // Less than 5 bytes
+        assert!(parse_mysql_request(&[0x01, 0x00]).is_none());
+        assert!(parse_mysql_request(&[0x01, 0x00, 0x00, 0x00]).is_none());
+    }
+
+    #[test]
+    fn test_incomplete_payload() {
+        // Header says 10 bytes but only 2 provided
+        assert!(parse_mysql_request(&[0x0a, 0x00, 0x00, 0x00, 0x03, 0x53]).is_none());
+    }
+
+    #[test]
+    fn test_non_zero_sequence_rejected() {
+        // seq != 0 should be rejected (continuation packet)
+        let sql = b"SELECT 1";
+        let mut pkt = vec![
+            (sql.len() + 1) as u8, 0, 0,
+            5, // sequence = 5, not 0
+            0x03,
+        ];
+        pkt.extend_from_slice(sql);
+        assert!(parse_mysql_request(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_zero_length_payload() {
+        // payload_len = 0
+        assert!(parse_mysql_request(&[0x00, 0x00, 0x00, 0x00]).is_none());
+    }
+
+    #[test]
+    fn test_unknown_command_byte() {
+        // Unknown command byte during handshake
+        let pkt = vec![0x01, 0x00, 0x00, 0x00, 0xFF];
+        assert!(parse_mysql_request(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_com_field_list_filtered() {
+        // COM_FIELD_LIST (0x04) should return None
+        let pkt = vec![0x05, 0x00, 0x00, 0x00, 0x04, b't', b'a', b'b', b'l'];
+        assert!(parse_mysql_request(&pkt).is_none());
+    }
+
+    #[test]
+    fn test_com_ping() {
+        let pkt = vec![0x01, 0x00, 0x00, 0x00, 0x0e];
+        let result = parse_mysql_request(&pkt).unwrap();
+        assert_eq!(result.command, MysqlCommand::Ping);
+        assert_eq!(result.to_summary(), "PING");
+    }
+
+    #[test]
+    fn test_com_quit() {
+        let pkt = vec![0x01, 0x00, 0x00, 0x00, 0x01];
+        let result = parse_mysql_request(&pkt).unwrap();
+        assert_eq!(result.command, MysqlCommand::Quit);
+        assert_eq!(result.to_summary(), "QUIT");
+    }
+
+    #[test]
+    fn test_com_init_db() {
+        let db = b"testdb";
+        let mut pkt = vec![(db.len() + 1) as u8, 0x00, 0x00, 0x00, 0x02];
+        pkt.extend_from_slice(db);
+        let result = parse_mysql_request(&pkt).unwrap();
+        assert_eq!(result.command, MysqlCommand::InitDb);
+        assert!(result.to_summary().contains("USE"));
+    }
+
+    #[test]
+    fn test_error_response() {
+        // ERR packet: marker(1) + error_code(2) + '#'(1) + sql_state(5) + message
+        let mut payload = vec![0xff]; // marker
+        payload.extend_from_slice(&[0x01, 0x00]); // error code
+        payload.push(b'#'); // sql_state marker
+        payload.extend_from_slice(b"HY000"); // sql_state
+        payload.extend_from_slice(b"test error");
+        let len = payload.len() as u32;
+        let mut pkt = vec![
+            (len & 0xff) as u8,
+            ((len >> 8) & 0xff) as u8,
+            ((len >> 16) & 0xff) as u8,
+            0x01, // sequence
+        ];
+        pkt.extend_from_slice(&payload);
+        let resp = parse_mysql_response(&pkt).unwrap();
+        assert!(matches!(resp, MysqlResponse::Error { .. }));
+    }
+
+    #[test]
+    fn test_response_complete_ok() {
+        // OK packet is immediately complete
+        let pkt = vec![7, 0, 0, 1, 0x00, 0, 0, 0x02, 0, 0, 0];
+        assert!(mysql_response_complete(&pkt));
+    }
+
+    #[test]
+    fn test_response_complete_error() {
+        // ERR packet is immediately complete
+        let pkt = vec![17, 0, 0, 1, 0xff, 0x01, 0x00, b'#', b'H', b'Y', b'0', b'0', b'0', b'e', b'r', b'r', b'o', b'r', b' ', b'm', b's', b'g'];
+        assert!(mysql_response_complete(&pkt));
+    }
+
+    #[test]
+    fn test_response_incomplete_empty() {
+        assert!(!mysql_response_complete(&[]));
+        assert!(!mysql_response_complete(&[0x01]));
+    }
+
+    #[test]
+    fn test_response_complete_resultset() {
+        // Simplified result set: just check that EOF marker makes it complete
+        // EOF packet: len=5, seq=3, marker=0xfe, + 4 bytes
+        let buf = vec![0x05, 0x00, 0x00, 0x03, 0xfe, 0x00, 0x00, 0x02, 0x00];
+        assert!(mysql_response_complete(&buf));
+    }
+
+    #[test]
+    fn test_long_query_truncated() {
+        // Very long SQL should be truncated in summary
+        let long_sql = "SELECT ".to_string() + &"x".repeat(200);
+        let sql_bytes = long_sql.as_bytes();
+        let mut pkt = vec![(sql_bytes.len() + 1) as u8, 0, 0, 0x00, 0x03];
+        pkt.extend_from_slice(sql_bytes);
+        let result = parse_mysql_request(&pkt).unwrap();
+        let summary = result.to_summary();
+        assert!(summary.len() <= 125); // 120 chars + "..."
+        assert!(summary.ends_with("..."));
+    }
 }
 
 /// Check if a MySQL response buffer is complete (ends with OK/EOF/ERR packet).

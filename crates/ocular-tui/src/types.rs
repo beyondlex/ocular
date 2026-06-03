@@ -598,3 +598,235 @@ pub enum ProxyChange {
     SwitchGroup(PathBuf),
     StopAll,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    // ─── EventFormat ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_event_format_parse_simple() {
+        let fmt = EventFormat::parse("%time %command");
+        assert_eq!(fmt.segments.len(), 3); // time, space, command
+    }
+
+    #[test]
+    fn test_event_format_parse_with_width() {
+        let fmt = EventFormat::parse("%{5}index %{10}time");
+        match &fmt.segments[0] {
+            FormatSegment::Field { name, width } => {
+                assert_eq!(name, "index");
+                assert_eq!(*width, Some(5));
+            }
+            _ => panic!("expected field"),
+        }
+    }
+
+    #[test]
+    fn test_event_format_parse_negative_width() {
+        let fmt = EventFormat::parse("%{-12}component");
+        match &fmt.segments[0] {
+            FormatSegment::Field { name, width } => {
+                assert_eq!(name, "component");
+                assert_eq!(*width, Some(-12));
+            }
+            _ => panic!("expected field"),
+        }
+    }
+
+    #[test]
+    fn test_event_format_parse_literal() {
+        let fmt = EventFormat::parse("hello world");
+        assert_eq!(fmt.segments.len(), 1);
+        match &fmt.segments[0] {
+            FormatSegment::Literal(s) => assert_eq!(s, "hello world"),
+            _ => panic!("expected literal"),
+        }
+    }
+
+    #[test]
+    fn test_event_format_parse_mixed() {
+        let fmt = EventFormat::parse("%{5}index %time [%{-12}component] %command (%latency)");
+        // Should have segments for each field and literal
+        assert!(fmt.segments.len() > 5);
+    }
+
+    #[test]
+    fn test_event_format_default() {
+        let fmt = EventFormat::default_format();
+        assert!(!fmt.segments.is_empty());
+    }
+
+    // ─── ExcludeMatcher ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_exclude_matcher_empty() {
+        let m = ExcludeMatcher::new(None, None);
+        assert!(m.is_noop());
+        assert!(!m.is_excluded("PING"));
+    }
+
+    #[test]
+    fn test_exclude_matcher_plain() {
+        let cfg = vec![ExcludeConfig {
+            patterns: vec!["PING".into(), "INFO".into()],
+            case_sensitive: false,
+            regex: false,
+        }];
+        let m = ExcludeMatcher::new(Some(&cfg), None);
+        assert!(!m.is_noop());
+        assert!(m.is_excluded("PING"));
+        assert!(m.is_excluded("ping")); // case insensitive
+        assert!(!m.is_excluded("SET key value"));
+    }
+
+    #[test]
+    fn test_exclude_matcher_case_sensitive() {
+        let cfg = vec![ExcludeConfig {
+            patterns: vec!["PING".into()],
+            case_sensitive: true,
+            regex: false,
+        }];
+        let m = ExcludeMatcher::new(Some(&cfg), None);
+        assert!(m.is_excluded("PING"));
+        assert!(!m.is_excluded("ping"));
+    }
+
+    #[test]
+    fn test_exclude_matcher_regex() {
+        let cfg = vec![ExcludeConfig {
+            patterns: vec!["^SELECT 1$".into()],
+            case_sensitive: false,
+            regex: true,
+        }];
+        let m = ExcludeMatcher::new(Some(&cfg), None);
+        assert!(m.is_excluded("SELECT 1"));
+        assert!(!m.is_excluded("SELECT 1 FROM dual"));
+    }
+
+    #[test]
+    fn test_exclude_matcher_include_overrides() {
+        let exclude = vec![ExcludeConfig {
+            patterns: vec!["PING".into()],
+            case_sensitive: false,
+            regex: false,
+        }];
+        let include = ExcludeConfig {
+            patterns: vec!["PING".into()],
+            case_sensitive: false,
+            regex: false,
+        };
+        let m = ExcludeMatcher::new(Some(&exclude), Some(&include));
+        assert!(!m.is_excluded("PING")); // include overrides
+        assert!(!m.is_excluded("SET key"));
+    }
+
+    // ─── ComponentStats ─────────────────────────────────────────────────
+
+    fn make_event(latency_ms: u64, response: &str) -> ProxyEvent {
+        ProxyEvent {
+            timestamp: SystemTime::now(),
+            component: "test".into(),
+            protocol: ocular_protocol::Protocol::Redis,
+            command: "CMD".into(),
+            full_command: "CMD".into(),
+            response: response.into(),
+            response_detail: String::new(),
+            latency: Duration::from_millis(latency_ms),
+            process: None,
+            src: None,
+            dest: None,
+            system: false,
+        }
+    }
+
+    #[test]
+    fn test_component_stats_record() {
+        let mut stats = ComponentStats::default();
+        stats.record(&make_event(5, "OK"));
+        stats.record(&make_event(10, "OK"));
+        stats.record(&make_event(15, "OK"));
+        assert_eq!(stats.count, 3);
+        assert_eq!(stats.error_count, 0);
+    }
+
+    #[test]
+    fn test_component_stats_errors() {
+        let mut stats = ComponentStats::default();
+        stats.record(&make_event(5, "OK"));
+        stats.record(&make_event(10, "ERR timeout"));
+        stats.record(&make_event(3, "ERROR bad"));
+        assert_eq!(stats.error_count, 2);
+    }
+
+    #[test]
+    fn test_component_stats_error_rate() {
+        let mut stats = ComponentStats::default();
+        stats.record(&make_event(5, "OK"));
+        stats.record(&make_event(10, "ERR"));
+        assert!((stats.error_rate() - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_component_stats_error_rate_empty() {
+        let stats = ComponentStats::default();
+        assert_eq!(stats.error_rate(), 0.0);
+    }
+
+    #[test]
+    fn test_component_stats_avg_latency() {
+        let mut stats = ComponentStats::default();
+        stats.record(&make_event(10, "OK"));
+        stats.record(&make_event(20, "OK"));
+        stats.record(&make_event(30, "OK"));
+        let avg = stats.avg_latency();
+        assert_eq!(avg.as_millis(), 20);
+    }
+
+    #[test]
+    fn test_component_stats_avg_latency_empty() {
+        let stats = ComponentStats::default();
+        assert_eq!(stats.avg_latency(), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_component_stats_p95() {
+        let mut stats = ComponentStats::default();
+        for i in 1..=100 {
+            stats.record(&make_event(i, "OK"));
+        }
+        let p95 = stats.p95_latency();
+        // P95 of 1..100 should be around 95ms
+        assert!(p95.as_millis() >= 94 && p95.as_millis() <= 96);
+    }
+
+    #[test]
+    fn test_component_stats_p95_empty() {
+        let stats = ComponentStats::default();
+        assert_eq!(stats.p95_latency(), Duration::ZERO);
+    }
+
+    #[test]
+    fn test_component_stats_system_event_skipped() {
+        let mut stats = ComponentStats::default();
+        let mut ev = make_event(5, "ERR");
+        ev.system = true;
+        stats.record(&ev);
+        assert_eq!(stats.count, 1);
+        assert_eq!(stats.error_count, 1);
+        // But latency should not be recorded for system events
+        assert_eq!(stats.latencies.len(), 0);
+    }
+
+    #[test]
+    fn test_component_stats_min_max() {
+        let mut stats = ComponentStats::default();
+        stats.record(&make_event(3, "OK"));
+        stats.record(&make_event(15, "OK"));
+        stats.record(&make_event(7, "OK"));
+        assert_eq!(stats.latency_min.as_millis(), 3);
+        assert_eq!(stats.latency_max.as_millis(), 15);
+    }
+}

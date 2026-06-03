@@ -216,3 +216,163 @@ pub(crate) fn highlight_json_line(line: &str) -> ratatui::text::Line<'static> {
     }
     Line::from(spans)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn test_format_latency_sub_millisecond() {
+        let d = Duration::from_micros(420);
+        let s = format_latency(&d);
+        assert!(s.ends_with("ms"));
+        assert!(s.contains("0.4"));
+    }
+
+    #[test]
+    fn test_format_latency_milliseconds() {
+        let d = Duration::from_millis(5);
+        let s = format_latency(&d);
+        assert!(s.contains("5"));
+        assert!(s.ends_with("ms"));
+    }
+
+    #[test]
+    fn test_format_latency_over_100ms() {
+        let d = Duration::from_millis(150);
+        let s = format_latency(&d);
+        assert!(s.contains("150"));
+    }
+
+    #[test]
+    fn test_format_latency_over_1s() {
+        let d = Duration::from_millis(2500);
+        let s = format_latency(&d);
+        assert!(s.contains("2500"));
+    }
+
+    #[test]
+    fn test_split_addr_with_port() {
+        let (h, p) = split_addr("127.0.0.1:6379");
+        assert_eq!(h, "127.0.0.1");
+        assert_eq!(p, "6379");
+    }
+
+    #[test]
+    fn test_split_addr_without_port() {
+        let (h, p) = split_addr("localhost");
+        assert_eq!(h, "localhost");
+        assert_eq!(p, "");
+    }
+
+    #[test]
+    fn test_split_addr_ipv6_like() {
+        let (h, p) = split_addr("[::1]:8080");
+        assert_eq!(h, "[::1]");
+        assert_eq!(p, "8080");
+    }
+
+    #[test]
+    fn test_highlight_sql_keywords() {
+        let line = highlight_sql_line("SELECT * FROM users WHERE id = 1");
+        let spans = &line.spans;
+        // Should have multiple spans with different styles
+        assert!(spans.len() > 3);
+        // "SELECT" should be styled as keyword (Magenta + Bold)
+        let select_span = &spans[0];
+        assert_eq!(select_span.content.as_ref(), "SELECT");
+    }
+
+    #[test]
+    fn test_highlight_sql_string_literal() {
+        let line = highlight_sql_line("SELECT 'hello'");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(text.contains("'hello'"));
+    }
+
+    #[test]
+    fn test_highlight_sql_numbers() {
+        let line = highlight_sql_line("SELECT 42");
+        // 42 should be highlighted as a number
+        let text: String = line.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(text.contains("42"));
+    }
+
+    #[test]
+    fn test_highlight_json_string_key() {
+        let line = highlight_json_line("\"name\": \"Alice\"");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(text.contains("\"name\""));
+        assert!(text.contains("\"Alice\""));
+    }
+
+    #[test]
+    fn test_highlight_json_number() {
+        let line = highlight_json_line("42");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(text.contains("42"));
+    }
+
+    #[test]
+    fn test_highlight_json_boolean() {
+        let line = highlight_json_line("true");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(text.contains("true"));
+    }
+
+    #[test]
+    fn test_highlight_json_null() {
+        let line = highlight_json_line("null");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(text.contains("null"));
+    }
+
+    #[test]
+    fn test_highlight_json_braces() {
+        let line = highlight_json_line("{}");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref().to_string()).collect();
+        assert!(text.contains("{"));
+        assert!(text.contains("}"));
+    }
+
+    #[test]
+    fn test_format_time() {
+        let now = SystemTime::now();
+        let s = format_time(&now);
+        // Should be HH:MM:SS.mmm format
+        assert!(s.contains(':'));
+        assert!(s.contains('.'));
+        assert!(s.len() >= 12);
+    }
+
+    #[test]
+    fn test_format_sql() {
+        let sql = "select * from users where id = 1";
+        let formatted = format_sql(sql);
+        // sqlformat uppercases keywords
+        assert!(formatted.contains("SELECT") || formatted.contains("select"));
+    }
+
+    #[test]
+    fn test_format_copy_text_uses_handler() {
+        use ocular_protocol::Protocol;
+        use std::time::SystemTime;
+        let ev = ProxyEvent {
+            timestamp: SystemTime::now(),
+            component: "test".into(),
+            protocol: Protocol::Redis,
+            command: "GET key".into(),
+            full_command: "GET key".into(),
+            response: "value".into(),
+            response_detail: "value".into(),
+            latency: Duration::from_millis(1),
+            process: None,
+            src: None,
+            dest: None,
+            system: false,
+        };
+        let text = format_copy_text(&ev);
+        assert!(text.contains("GET"));
+    }
+}

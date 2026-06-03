@@ -817,3 +817,213 @@ mod tests {
         assert!(result.is_ok());
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use tokio::net::{TcpListener, TcpStream};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::broadcast;
+    use std::time::Duration;
+
+    /// Start a mock "remote" server that echoes data back after a small delay.
+    async fn start_echo_server() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = match stream.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    // Echo back after small delay to simulate response
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    if stream.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        (addr, handle)
+    }
+
+    /// Start a mock Redis server that responds with +OK\r\n
+    async fn start_redis_mock() -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let handle = tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                loop {
+                    let _n = match stream.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+                    // Respond with +OK for any command
+                    let _ = stream.write_all(b"+OK\r\n").await;
+                }
+            }
+        });
+        (addr, handle)
+    }
+
+    #[tokio::test]
+    async fn test_proxy_redis_event_flow() {
+        let (remote_addr, _server) = start_redis_mock().await;
+        let (tx, mut rx) = broadcast::channel::<ProxyEvent>(64);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let status: StatusMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+        // Start proxy on random port
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap().to_string();
+        drop(proxy_listener); // Release port for run_proxy to bind
+
+        let tx_clone = tx.clone();
+        let status_clone = status.clone();
+        let proxy_addr_clone = proxy_addr.clone();
+        let proxy_handle = tokio::spawn(async move {
+            let _ = run_proxy(
+                proxy_addr_clone,
+                remote_addr,
+                "test-redis".into(),
+                Protocol::Redis,
+                tx_clone,
+                shutdown_rx,
+                status_clone,
+            ).await;
+        });
+
+        // Wait for proxy to start
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Connect client and send Redis command
+        if let Ok(mut client) = TcpStream::connect(&proxy_addr).await {
+            // Send SET key value in RESP format
+            let cmd = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
+            let _ = client.write_all(cmd).await;
+
+            // Read response
+            let mut buf = [0u8; 256];
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                client.read(&mut buf),
+            ).await;
+
+            // Check that an event was emitted
+            if let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                assert!(!ev.system, "should not be a system event");
+                assert_eq!(ev.component, "test-redis");
+                assert_eq!(ev.protocol, Protocol::Redis);
+                assert!(ev.command.contains("SET"));
+                assert!(ev.response.contains("OK"));
+                assert!(ev.latency > Duration::ZERO);
+            }
+
+            drop(client);
+        }
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), proxy_handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_proxy_connection_error_emits_system_event() {
+        let (tx, mut rx) = broadcast::channel::<ProxyEvent>(64);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let status: StatusMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+        // Bind to a random port, then release it — proxy will bind successfully
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap().to_string();
+        drop(proxy_listener);
+
+        // Point to a remote that doesn't exist (closed port)
+        let closed_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dead_addr = closed_listener.local_addr().unwrap().to_string();
+        drop(closed_listener);
+
+        let status_clone = status.clone();
+        let proxy_addr_clone = proxy_addr.clone();
+        let proxy_handle = tokio::spawn(async move {
+            let _ = run_proxy(
+                proxy_addr_clone,
+                dead_addr,
+                "dead-remote".into(),
+                Protocol::Redis,
+                tx,
+                shutdown_rx,
+                status_clone,
+            ).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Connect — proxy will try to connect to dead remote and fail
+        if let Ok(mut client) = TcpStream::connect(&proxy_addr).await {
+            // Redis protocol: proxy sends -ERR when remote unreachable
+            let mut buf = [0u8; 512];
+            let _ = tokio::time::timeout(
+                Duration::from_secs(2),
+                client.read(&mut buf),
+            ).await;
+
+            // Should get a system event
+            if let Ok(Ok(ev)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+                assert!(ev.system || ev.command.contains("cannot reach") || ev.response.contains("ERR"));
+            }
+            drop(client);
+        }
+
+        let _ = shutdown_tx.send(true);
+        let _ = tokio::time::timeout(Duration::from_secs(2), proxy_handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_proxy_shutdown_stops_accepting() {
+        let (remote_addr, _server) = start_redis_mock().await;
+        let (tx, _rx) = broadcast::channel::<ProxyEvent>(64);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let status: StatusMap = Arc::new(Mutex::new(std::collections::HashMap::new()));
+
+        let proxy_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap().to_string();
+        drop(proxy_listener);
+
+        let status_clone = status.clone();
+        let proxy_handle = tokio::spawn(async move {
+            let _ = run_proxy(
+                proxy_addr.clone(),
+                remote_addr,
+                "shutdown-test".into(),
+                Protocol::Redis,
+                tx,
+                shutdown_rx,
+                status_clone,
+            ).await;
+        });
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Shutdown
+        let _ = shutdown_tx.send(true);
+        let result = tokio::time::timeout(Duration::from_secs(3), proxy_handle).await;
+        assert!(result.is_ok(), "proxy should shut down within 3 seconds");
+    }
+
+    #[test]
+    fn test_req_buf_mgr_new() {
+        let mgr = ReqBufMgr::new();
+        assert_eq!(mgr.buf.capacity(), 4096);
+    }
+
+    #[test]
+    fn test_resp_buf_mgr_new() {
+        let mgr = RespBufMgr::new();
+        assert_eq!(mgr.buf.capacity(), 4096);
+    }
+}

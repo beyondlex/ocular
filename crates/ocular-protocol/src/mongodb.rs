@@ -566,4 +566,167 @@ mod tests {
         let result = extract_mongo_full_command(&buf).unwrap();
         assert!(result.contains("db.users.find"));
     }
+
+    // ─── Edge case tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_buffer_too_short() {
+        assert!(parse_mongo_request(&[]).is_none());
+        assert!(parse_mongo_request(&[0u8; 10]).is_none());
+        assert!(parse_mongo_request(&[0u8; 20]).is_none()); // header but no doc
+    }
+
+    #[test]
+    fn test_invalid_opcode() {
+        // OP_MSG = 2013, use something else
+        let mut buf = build_op_msg(&build_simple_cmd("find", "users"));
+        // Overwrite opcode at offset 12
+        buf[12] = 0x00;
+        buf[13] = 0x00;
+        buf[14] = 0x00;
+        buf[15] = 0x00;
+        assert!(parse_mongo_request(&buf).is_none());
+    }
+
+    #[test]
+    fn test_empty_document() {
+        // OP_MSG with empty BSON doc (just size + terminator)
+        let doc = vec![5, 0, 0, 0, 0]; // 5-byte empty doc
+        let buf = build_op_msg(&doc);
+        assert!(parse_mongo_request(&buf).is_none()); // no command key
+    }
+
+    #[test]
+    fn test_truncated_bson_document() {
+        // Doc claims to be 100 bytes but only has 10
+        let mut doc = vec![100, 0, 0, 0]; // lies about size
+        doc.extend_from_slice(&[0x02]); // string type
+        doc.extend_from_slice(b"cmd\0"); // key
+        // Missing value — truncated
+        let buf = build_op_msg(&doc);
+        assert!(parse_mongo_request(&buf).is_none());
+    }
+
+    #[test]
+    fn test_mongo_msg_len_bounds() {
+        // Too small (< 16)
+        assert_eq!(mongo_msg_len(&[15, 0, 0, 0]), None);
+        // Too large (> 48MB)
+        assert_eq!(mongo_msg_len(&[0xFF, 0xFF, 0xFF, 0x03]), None);
+    }
+
+    #[test]
+    fn test_response_ok_with_n() {
+        // {"ok": 1.0, "n": 5}
+        let mut doc = Vec::new();
+        doc.extend_from_slice(&[0; 4]); // size placeholder
+        doc.push(0x01); // double
+        doc.extend_from_slice(b"ok\0");
+        doc.extend_from_slice(&1.0f64.to_le_bytes());
+        doc.push(0x10); // int32
+        doc.extend_from_slice(b"n\0");
+        doc.extend_from_slice(&5i32.to_le_bytes());
+        doc.push(0);
+        let len = doc.len() as i32;
+        doc[0..4].copy_from_slice(&len.to_le_bytes());
+        let buf = build_op_msg(&doc);
+        let result = parse_mongo_response(&buf).unwrap();
+        assert!(result.contains("n=5"));
+    }
+
+    #[test]
+    fn test_response_with_nmodified() {
+        // {"ok": 1.0, "n": 3, "nModified": 2}
+        let mut doc = Vec::new();
+        doc.extend_from_slice(&[0; 4]);
+        doc.push(0x01); doc.extend_from_slice(b"ok\0");
+        doc.extend_from_slice(&1.0f64.to_le_bytes());
+        doc.push(0x10); doc.extend_from_slice(b"n\0");
+        doc.extend_from_slice(&3i32.to_le_bytes());
+        doc.push(0x10); doc.extend_from_slice(b"nModified\0");
+        doc.extend_from_slice(&2i32.to_le_bytes());
+        doc.push(0);
+        let len = doc.len() as i32;
+        doc[0..4].copy_from_slice(&len.to_le_bytes());
+        let buf = build_op_msg(&doc);
+        let result = parse_mongo_response(&buf).unwrap();
+        assert!(result.contains("modified=2"));
+    }
+
+    #[test]
+    fn test_response_cursor_result() {
+        // {"ok": 1.0, "cursor": {"firstBatch": [...]}}
+        let mut batch_doc = Vec::new();
+        batch_doc.extend_from_slice(&[0; 4]);
+        batch_doc.push(0x10); batch_doc.extend_from_slice(b"0\0");
+        batch_doc.extend_from_slice(&1i32.to_le_bytes());
+        batch_doc.push(0);
+        let batch_len = batch_doc.len() as i32;
+        batch_doc[0..4].copy_from_slice(&batch_len.to_le_bytes());
+
+        let mut cursor_doc = Vec::new();
+        cursor_doc.extend_from_slice(&[0; 4]);
+        cursor_doc.push(0x04); // array type
+        cursor_doc.extend_from_slice(b"firstBatch\0");
+        cursor_doc.extend_from_slice(&batch_doc);
+        cursor_doc.push(0);
+        let cursor_len = cursor_doc.len() as i32;
+        cursor_doc[0..4].copy_from_slice(&cursor_len.to_le_bytes());
+
+        let mut doc = Vec::new();
+        doc.extend_from_slice(&[0; 4]);
+        doc.push(0x01); doc.extend_from_slice(b"ok\0");
+        doc.extend_from_slice(&1.0f64.to_le_bytes());
+        doc.push(0x03); doc.extend_from_slice(b"cursor\0");
+        doc.extend_from_slice(&cursor_doc);
+        doc.push(0);
+        let len = doc.len() as i32;
+        doc[0..4].copy_from_slice(&len.to_le_bytes());
+
+        let buf = build_op_msg(&doc);
+        let result = parse_mongo_response(&buf).unwrap();
+        assert!(result.contains("1 docs"));
+    }
+
+    #[test]
+    fn test_extract_full_command_insert() {
+        let doc = build_simple_cmd("insert", "products");
+        let buf = build_op_msg(&doc);
+        let result = extract_mongo_full_command(&buf).unwrap();
+        assert!(result.contains("db.products.insertOne") || result.contains("db.products.insertMany"));
+    }
+
+    #[test]
+    fn test_extract_full_command_update() {
+        let doc = build_simple_cmd("update", "orders");
+        let buf = build_op_msg(&doc);
+        let result = extract_mongo_full_command(&buf).unwrap();
+        assert!(result.contains("db.orders."));
+    }
+
+    #[test]
+    fn test_extract_full_command_delete() {
+        let doc = build_simple_cmd("delete", "logs");
+        let buf = build_op_msg(&doc);
+        let result = extract_mongo_full_command(&buf).unwrap();
+        assert!(result.contains("db.logs."));
+    }
+
+    #[test]
+    fn test_extract_full_command_aggregate() {
+        let doc = build_simple_cmd("aggregate", "metrics");
+        let buf = build_op_msg(&doc);
+        let result = extract_mongo_full_command(&buf).unwrap();
+        assert!(result.contains("db.metrics.aggregate"));
+    }
+
+    #[test]
+    fn test_unknown_command_with_db() {
+        // build_simple_cmd creates: {cmd: "ping", $db: "testdb"}
+        let doc = build_simple_cmd("ping", "admin");
+        let buf = build_op_msg(&doc);
+        let result = parse_mongo_request(&buf).unwrap();
+        assert!(result.contains("ping"));
+        assert!(result.contains("testdb")); // $db field is always "testdb" in build_simple_cmd
+    }
 }

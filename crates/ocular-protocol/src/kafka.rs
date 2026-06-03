@@ -434,4 +434,124 @@ mod tests {
     fn test_frame_incomplete() {
         assert!(!kafka_frame_complete(&[0, 0, 0, 10, 0, 0]));
     }
+
+    // ─── Edge case tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_buffer_too_short() {
+        assert!(parse_kafka_request(&[]).is_none());
+        assert!(parse_kafka_request(&[0, 0]).is_none());
+        assert!(parse_kafka_request(&[0, 0, 0, 5, 0, 0]).is_none()); // claims 5 bytes, has 2
+    }
+
+    #[test]
+    fn test_response_too_short() {
+        assert!(parse_kafka_response(&[]).is_none());
+        assert!(parse_kafka_response(&[0, 0, 0, 2]).is_none());
+    }
+
+    #[test]
+    fn test_unknown_api_key() {
+        let buf = make_request(999, 1, "test");
+        let result = parse_kafka_request(&buf).unwrap();
+        assert!(result.contains("ApiKey(999)"));
+    }
+
+    #[test]
+    fn test_null_client_id() {
+        // client_id_len = -1 (null)
+        let mut buf = Vec::new();
+        let payload_len = 2 + 2 + 4 + 2; // api_key + version + correlation_id + client_id_len
+        buf.extend_from_slice(&(payload_len as i32).to_be_bytes());
+        buf.extend_from_slice(&3i16.to_be_bytes()); // Metadata
+        buf.extend_from_slice(&1i16.to_be_bytes());
+        buf.extend_from_slice(&1i32.to_be_bytes());
+        buf.extend_from_slice(&(-1i16).to_be_bytes()); // null client_id
+        let result = parse_kafka_request(&buf).unwrap();
+        assert!(result.contains("Metadata"));
+    }
+
+    #[test]
+    fn test_empty_client_id() {
+        let buf = make_request(3, 1, "");
+        let result = parse_kafka_request(&buf).unwrap();
+        assert!(result.contains("Metadata"));
+    }
+
+    #[test]
+    fn test_frame_complete_zero_length() {
+        let buf = vec![0, 0, 0, 0]; // length = 0
+        assert!(kafka_frame_complete(&buf));
+    }
+
+    #[test]
+    fn test_frame_complete_exact() {
+        let mut buf = vec![0, 0, 0, 8]; // length = 8
+        buf.extend_from_slice(&[0u8; 8]);
+        assert!(kafka_frame_complete(&buf));
+        assert!(!kafka_frame_complete(&buf[..11]));
+    }
+
+    #[test]
+    fn test_api_key_names() {
+        assert_eq!(api_key_name(0), "Produce");
+        assert_eq!(api_key_name(1), "Fetch");
+        assert_eq!(api_key_name(11), "JoinGroup");
+        assert_eq!(api_key_name(19), "CreateTopics");
+        assert_eq!(api_key_name(999), "Unknown");
+    }
+
+    #[test]
+    fn test_extract_full_command_non_produce() {
+        let buf = make_request(3, 1, "test");
+        let result = extract_kafka_full_command(&buf).unwrap();
+        assert!(result.contains("Metadata"));
+    }
+
+    #[test]
+    fn test_extract_full_command_buffer_too_short() {
+        assert!(extract_kafka_full_command(&[0, 0]).is_none());
+    }
+
+    #[test]
+    fn test_multiple_frames_in_buffer() {
+        // Two complete frames
+        let mut buf = Vec::new();
+        let frame1 = make_request(3, 1, "app1");
+        let frame2 = make_request(18, 2, "app2");
+        buf.extend_from_slice(&frame1);
+        buf.extend_from_slice(&frame2);
+        assert!(kafka_frame_complete(&buf));
+        // Should parse first frame
+        let result = parse_kafka_request(&buf).unwrap();
+        assert!(result.contains("Metadata"));
+    }
+
+    #[test]
+    fn test_create_topics_request() {
+        let buf = make_request(19, 5, "admin");
+        let result = parse_kafka_request(&buf).unwrap();
+        assert!(result.contains("CreateTopics"));
+    }
+
+    #[test]
+    fn test_delete_topics_request() {
+        let buf = make_request(20, 3, "admin");
+        let result = parse_kafka_request(&buf).unwrap();
+        assert!(result.contains("DeleteTopics"));
+    }
+
+    #[test]
+    fn test_heartbeat_request() {
+        let buf = make_request(12, 4, "consumer");
+        let result = parse_kafka_request(&buf).unwrap();
+        assert!(result.contains("Heartbeat"));
+    }
+
+    #[test]
+    fn test_join_group_request() {
+        let buf = make_request(11, 7, "consumer");
+        let result = parse_kafka_request(&buf).unwrap();
+        assert!(result.contains("JoinGroup"));
+    }
 }

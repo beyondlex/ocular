@@ -413,4 +413,244 @@ mod tests {
         assert!(method.summary.contains("test"));
         assert!(method.summary.contains("rk"));
     }
+
+    // ─── Edge case tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_incomplete_frame_header() {
+        assert!(parse_amqp_frame(&[]).is_none());
+        assert!(parse_amqp_frame(&[1, 0]).is_none());
+        assert!(parse_amqp_frame(&[1, 0, 0, 0, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn test_incomplete_frame_payload() {
+        // Frame says size=100 but only has 5 bytes
+        let mut buf = vec![1, 0, 0, 0, 0, 0, 100];
+        buf.extend_from_slice(&[0u8; 5]);
+        assert!(parse_amqp_frame(&buf).is_none());
+    }
+
+    #[test]
+    fn test_invalid_frame_end() {
+        let buf = [1, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0xFF]; // 0xFF instead of 0xCE
+        assert!(parse_amqp_frame(&buf).is_none());
+    }
+
+    #[test]
+    fn test_incomplete_protocol_header() {
+        assert!(parse_amqp_frame(b"AMQP").is_none());
+        assert!(parse_amqp_frame(b"AMQP\x00\x00").is_none());
+    }
+
+    #[test]
+    fn test_frame_len_header() {
+        // Protocol header
+        assert_eq!(frame_len(b"AMQP\x00\x00\x09\x01"), Some(8));
+        // Incomplete
+        assert_eq!(frame_len(b"AMQP\x00\x00"), None);
+    }
+
+    #[test]
+    fn test_frame_len_normal_frame() {
+        let mut buf = vec![1, 0, 0, 0, 0, 0, 4]; // size=4
+        buf.extend_from_slice(&[0u8; 5]); // 4 payload + 0xCE
+        assert_eq!(frame_len(&buf), Some(12));
+    }
+
+    #[test]
+    fn test_frame_len_incomplete() {
+        assert_eq!(frame_len(&[1, 0, 0]), None);
+        // Claims 100 bytes but has 5
+        let buf = vec![1, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 0];
+        assert_eq!(frame_len(&buf), None);
+    }
+
+    #[test]
+    fn test_is_async_method() {
+        assert!(is_async_method(60, 40)); // Basic.Publish
+        assert!(is_async_method(60, 50)); // Basic.Return
+        assert!(is_async_method(60, 60)); // Basic.Deliver
+        assert!(is_async_method(60, 80)); // Basic.Ack
+        assert!(is_async_method(60, 90)); // Basic.Reject
+        assert!(is_async_method(60, 120)); // Basic.Nack
+        assert!(!is_async_method(60, 10)); // Basic.Qos
+        assert!(!is_async_method(10, 10)); // Connection.Start
+    }
+
+    #[test]
+    fn test_unknown_method() {
+        let mut buf = Vec::new();
+        buf.push(1); // method frame
+        buf.extend_from_slice(&1u16.to_be_bytes()); // channel
+        buf.extend_from_slice(&4u32.to_be_bytes()); // size
+        buf.extend_from_slice(&99u16.to_be_bytes()); // class=99
+        buf.extend_from_slice(&99u16.to_be_bytes()); // method=99
+        buf.push(0xCE);
+        let frame = parse_amqp_frame(&buf).unwrap();
+        let method = frame.method.unwrap();
+        assert!(method.summary.contains("Method(99.99)"));
+    }
+
+    #[test]
+    fn test_connection_open() {
+        let mut buf = Vec::new();
+        buf.push(1);
+        buf.extend_from_slice(&0u16.to_be_bytes());
+        let args = vec![3, b'/', b'/', b'/']; // vhost = "/"
+        buf.extend_from_slice(&((4 + args.len()) as u32).to_be_bytes());
+        buf.extend_from_slice(&10u16.to_be_bytes()); // Connection class
+        buf.extend_from_slice(&40u16.to_be_bytes()); // Open method
+        buf.extend_from_slice(&args);
+        buf.push(0xCE);
+        let frame = parse_amqp_frame(&buf).unwrap();
+        let method = frame.method.unwrap();
+        assert!(method.summary.contains("Connection.Open"));
+    }
+
+    #[test]
+    fn test_queue_declare() {
+        let mut buf = Vec::new();
+        buf.push(1);
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        let args = vec![
+            0, 0, // reserved
+            8, b'm', b'y', b'-', b'q', b'u', b'e', b'u', b'e', // queue name
+            0, // flags
+        ];
+        buf.extend_from_slice(&((4 + args.len()) as u32).to_be_bytes());
+        buf.extend_from_slice(&50u16.to_be_bytes()); // Queue class
+        buf.extend_from_slice(&10u16.to_be_bytes()); // Declare method
+        buf.extend_from_slice(&args);
+        buf.push(0xCE);
+        let frame = parse_amqp_frame(&buf).unwrap();
+        let method = frame.method.unwrap();
+        assert!(method.summary.contains("Queue.Declare"));
+        assert!(method.summary.contains("my-queue"));
+    }
+
+    #[test]
+    fn test_basic_consume() {
+        let mut buf = Vec::new();
+        buf.push(1);
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        let args = vec![
+            0, 0, // reserved
+            8, b'm', b'y', b'-', b'q', b'u', b'e', b'u', b'e',
+            4, b't', b'a', b'g', b'1', // consumer_tag
+        ];
+        buf.extend_from_slice(&((4 + args.len()) as u32).to_be_bytes());
+        buf.extend_from_slice(&60u16.to_be_bytes()); // Basic class
+        buf.extend_from_slice(&20u16.to_be_bytes()); // Consume method
+        buf.extend_from_slice(&args);
+        buf.push(0xCE);
+        let frame = parse_amqp_frame(&buf).unwrap();
+        let method = frame.method.unwrap();
+        assert!(method.summary.contains("Basic.Consume"));
+        assert!(method.summary.contains("my-queue"));
+    }
+
+    #[test]
+    fn test_basic_deliver() {
+        let mut buf = Vec::new();
+        buf.push(1);
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        let mut args = Vec::new();
+        args.push(4); args.extend_from_slice(b"tag1"); // consumer_tag
+        args.extend_from_slice(&1u64.to_be_bytes()); // delivery_tag
+        args.push(0); // redelivered
+        args.push(4); args.extend_from_slice(b"exch"); // exchange
+        args.push(2); args.extend_from_slice(b"rk"); // routing_key
+        buf.extend_from_slice(&((4 + args.len()) as u32).to_be_bytes());
+        buf.extend_from_slice(&60u16.to_be_bytes()); // Basic class
+        buf.extend_from_slice(&60u16.to_be_bytes()); // Deliver method
+        buf.extend_from_slice(&args);
+        buf.push(0xCE);
+        let frame = parse_amqp_frame(&buf).unwrap();
+        let method = frame.method.unwrap();
+        assert!(method.summary.contains("Basic.Deliver"));
+        assert!(method.summary.contains("exch"));
+    }
+
+    #[test]
+    fn test_header_frame() {
+        let mut buf = vec![2]; // type=2 (header)
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        buf.extend_from_slice(&10u32.to_be_bytes());
+        buf.extend_from_slice(&[0u8; 10]);
+        buf.push(0xCE);
+        let frame = parse_amqp_frame(&buf).unwrap();
+        assert_eq!(frame.frame_type, FRAME_HEADER);
+        assert!(frame.method.is_none());
+        assert!(frame.body.is_some());
+    }
+
+    #[test]
+    fn test_body_frame() {
+        let mut buf = vec![3]; // type=3 (body)
+        buf.extend_from_slice(&1u16.to_be_bytes());
+        buf.extend_from_slice(&5u32.to_be_bytes());
+        buf.extend_from_slice(b"hello");
+        buf.push(0xCE);
+        let frame = parse_amqp_frame(&buf).unwrap();
+        assert_eq!(frame.frame_type, FRAME_BODY);
+        assert_eq!(frame.body.unwrap(), b"hello");
+    }
+
+    #[test]
+    fn test_parse_amqp_request_summary() {
+        let buf = b"AMQP\x00\x00\x09\x01";
+        let result = parse_amqp_request(buf).unwrap();
+        assert!(result.contains("Protocol Header"));
+    }
+
+    #[test]
+    fn test_parse_amqp_response_body() {
+        let mut buf = vec![3, 0, 1];
+        buf.extend_from_slice(&11u32.to_be_bytes());
+        buf.extend_from_slice(b"hello world");
+        buf.push(0xCE);
+        let result = parse_amqp_response(&buf).unwrap();
+        assert!(result.contains("Body: hello world"));
+    }
+
+    #[test]
+    fn test_parse_amqp_request_full_with_body() {
+        // Method frame (Basic.Publish) + Header + Body
+        let mut method_buf = Vec::new();
+        method_buf.push(1);
+        method_buf.extend_from_slice(&1u16.to_be_bytes());
+        let args = vec![0, 0, 4, b't', b'e', b's', b't', 2, b'r', b'k', 0];
+        method_buf.extend_from_slice(&((4 + args.len()) as u32).to_be_bytes());
+        method_buf.extend_from_slice(&60u16.to_be_bytes());
+        method_buf.extend_from_slice(&40u16.to_be_bytes());
+        method_buf.extend_from_slice(&args);
+        method_buf.push(0xCE);
+
+        let mut header_buf = vec![2, 0, 1];
+        header_buf.extend_from_slice(&4u32.to_be_bytes());
+        header_buf.extend_from_slice(&[0u8; 4]);
+        header_buf.push(0xCE);
+
+        let mut body_buf = vec![3, 0, 1];
+        body_buf.extend_from_slice(&5u32.to_be_bytes());
+        body_buf.extend_from_slice(b"hello");
+        body_buf.push(0xCE);
+
+        let mut combined = method_buf;
+        combined.extend_from_slice(&header_buf);
+        combined.extend_from_slice(&body_buf);
+
+        let (summary, detail) = parse_amqp_request_full(&combined).unwrap();
+        assert!(summary.contains("Basic.Publish"));
+        assert!(detail.contains("Body: hello"));
+    }
+
+    #[test]
+    fn test_method_frame_too_small() {
+        let mut buf = vec![1, 0, 0, 0, 0, 0, 2]; // size=2 (too small for class+method)
+        buf.extend_from_slice(&[0, 0]);
+        buf.push(0xCE);
+        assert!(parse_amqp_frame(&buf).is_none());
+    }
 }

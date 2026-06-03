@@ -397,4 +397,199 @@ mod tests {
         let result = parse_postgres_response(&buf).unwrap();
         assert_eq!(result, "OK: INSERT 0 1");
     }
+
+    // ─── Edge case tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_incomplete_message() {
+        // Less than 5 bytes
+        assert!(parse_postgres_request(&[b'Q', 0x00]).is_none());
+        assert!(parse_postgres_request(&[b'Q', 0x00, 0x00, 0x00]).is_none());
+    }
+
+    #[test]
+    fn test_incomplete_payload() {
+        // Header says 20 bytes but only 5 provided
+        let buf = vec![b'Q', 0x00, 0x00, 0x00, 0x14, b'S', b'E'];
+        assert!(parse_postgres_request(&buf).is_none());
+    }
+
+    #[test]
+    fn test_empty_buffer() {
+        assert!(parse_postgres_request(&[]).is_none());
+        assert!(parse_postgres_response(&[]).is_none());
+    }
+
+    #[test]
+    fn test_ssl_request() {
+        // SSLRequest: length(4) + 80877103
+        let mut buf = vec![];
+        buf.extend_from_slice(&8u32.to_be_bytes());
+        buf.extend_from_slice(&80877103u32.to_be_bytes());
+        let result = parse_postgres_request(&buf).unwrap();
+        assert_eq!(result, "SSLRequest");
+    }
+
+    #[test]
+    fn test_cancel_request() {
+        let mut buf = vec![];
+        buf.extend_from_slice(&16u32.to_be_bytes());
+        buf.extend_from_slice(&80877102u32.to_be_bytes());
+        buf.extend_from_slice(&[0u8; 8]); // process_id + secret_key
+        let result = parse_postgres_request(&buf).unwrap();
+        assert_eq!(result, "CancelRequest");
+    }
+
+    #[test]
+    fn test_startup_message() {
+        // Startup: length(4) + version(4)=196608 + params
+        let mut buf = vec![];
+        let params = b"user\0postgres\0database\0test\0\0";
+        let len = 4 + 4 + params.len();
+        buf.extend_from_slice(&(len as u32).to_be_bytes());
+        buf.extend_from_slice(&196608u32.to_be_bytes());
+        buf.extend_from_slice(params);
+        let result = parse_postgres_request(&buf).unwrap();
+        assert!(result.contains("Startup"));
+        assert!(result.contains("postgres"));
+    }
+
+    #[test]
+    fn test_parse_message() {
+        // 'P' (Parse) message
+        let stmt = b"\0"; // unnamed
+        let query = b"SELECT $1\0";
+        let payload_len = stmt.len() + query.len() + 4; // +4 for length field
+        let mut buf = vec![b'P'];
+        buf.extend_from_slice(&(payload_len as u32).to_be_bytes());
+        buf.extend_from_slice(stmt);
+        buf.extend_from_slice(query);
+        let result = parse_postgres_request(&buf).unwrap();
+        assert!(result.contains("PREPARE"));
+    }
+
+    #[test]
+    fn test_execute_message() {
+        let portal = b"\0"; // unnamed
+        let payload_len = portal.len() + 4;
+        let mut buf = vec![b'E'];
+        buf.extend_from_slice(&(payload_len as u32).to_be_bytes());
+        buf.extend_from_slice(portal);
+        let result = parse_postgres_request(&buf).unwrap();
+        assert_eq!(result, "EXECUTE");
+    }
+
+    #[test]
+    fn test_sync_message() {
+        let mut buf = vec![b'S'];
+        buf.extend_from_slice(&4u32.to_be_bytes());
+        assert_eq!(parse_postgres_request(&buf).unwrap(), "SYNC");
+    }
+
+    #[test]
+    fn test_terminate_message() {
+        let mut buf = vec![b'X'];
+        buf.extend_from_slice(&4u32.to_be_bytes());
+        assert_eq!(parse_postgres_request(&buf).unwrap(), "TERMINATE");
+    }
+
+    #[test]
+    fn test_ssl_response() {
+        assert_eq!(parse_postgres_response(b"N").unwrap(), "SSLResponse: No");
+        assert_eq!(parse_postgres_response(b"S").unwrap(), "SSLResponse: Yes");
+    }
+
+    #[test]
+    fn test_authentication_ok() {
+        let mut buf = vec![b'R'];
+        buf.extend_from_slice(&8u32.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes()); // auth type = OK
+        assert_eq!(parse_postgres_response(&buf).unwrap(), "AuthenticationOk");
+    }
+
+    #[test]
+    fn test_ready_for_query() {
+        let mut buf = vec![b'Z'];
+        buf.extend_from_slice(&5u32.to_be_bytes());
+        buf.push(b'I'); // idle
+        assert_eq!(parse_postgres_response(&buf).unwrap(), "Ready (idle)");
+    }
+
+    #[test]
+    fn test_error_response() {
+        let mut buf = vec![b'E'];
+        let fields = b"SERROR\0C42601\0Msyntax error\0\0";
+        buf.extend_from_slice(&((fields.len() + 4) as u32).to_be_bytes());
+        buf.extend_from_slice(fields);
+        let result = parse_postgres_response(&buf).unwrap();
+        assert!(result.contains("ERROR"));
+    }
+
+    #[test]
+    fn test_multiple_messages_in_buffer() {
+        // ParameterStatus + ReadyForQuery
+        let mut buf = vec![];
+        // ParameterStatus
+        let ps_payload = b"server_version\015.0\0";
+        buf.push(b'S');
+        buf.extend_from_slice(&((ps_payload.len() + 4) as u32).to_be_bytes());
+        buf.extend_from_slice(ps_payload);
+        // ReadyForQuery
+        buf.push(b'Z');
+        buf.extend_from_slice(&5u32.to_be_bytes());
+        buf.push(b'I');
+        let result = parse_postgres_response(&buf).unwrap();
+        // Should return the first meaningful result
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_response_complete_ready_for_query() {
+        let mut buf = vec![b'Z'];
+        buf.extend_from_slice(&5u32.to_be_bytes());
+        buf.push(b'I');
+        assert!(postgres_response_complete(&buf));
+    }
+
+    #[test]
+    fn test_response_incomplete() {
+        assert!(!postgres_response_complete(&[]));
+        assert!(!postgres_response_complete(&[b'Z']));
+        // Missing final ReadyForQuery
+        let mut buf = vec![b'R'];
+        buf.extend_from_slice(&8u32.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        assert!(!postgres_response_complete(&buf));
+    }
+
+    #[test]
+    fn test_response_complete_ssl() {
+        assert!(postgres_response_complete(b"N"));
+        assert!(postgres_response_complete(b"S"));
+    }
+
+    #[test]
+    fn test_long_query_truncated() {
+        let long_sql = "SELECT ".to_string() + &"x".repeat(200) + "\0";
+        let sql_bytes = long_sql.as_bytes();
+        let len = (sql_bytes.len() as u32 + 4).to_be_bytes();
+        let mut buf = vec![b'Q'];
+        buf.extend_from_slice(&len);
+        buf.extend_from_slice(sql_bytes);
+        let result = parse_postgres_request(&buf).unwrap();
+        assert!(result.len() <= 125);
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn test_extract_full_command_no_truncation() {
+        let sql = "SELECT * FROM very_long_table_name WHERE id = 12345\0";
+        let sql_bytes = sql.as_bytes();
+        let len = (sql_bytes.len() as u32 + 4).to_be_bytes();
+        let mut buf = vec![b'Q'];
+        buf.extend_from_slice(&len);
+        buf.extend_from_slice(sql_bytes);
+        let result = extract_postgres_full_command(&buf).unwrap();
+        assert_eq!(result, "SELECT * FROM very_long_table_name WHERE id = 12345");
+    }
 }

@@ -135,4 +135,105 @@ mod tests {
         let (val, _) = parse_resp(input).unwrap().unwrap();
         assert_eq!(val.to_command_string(), "SET key value");
     }
+
+    // ─── Edge case tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_incomplete_simple_string() {
+        assert!(parse_resp(b"+OK").unwrap().is_none());
+        assert!(parse_resp(b"+").unwrap().is_none());
+        assert!(parse_resp(b"").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_incomplete_bulk_string() {
+        // Header complete, data incomplete
+        assert!(parse_resp(b"$5\r\nhel").unwrap().is_none());
+        assert!(parse_resp(b"$5\r\n").unwrap().is_none());
+        assert!(parse_resp(b"$").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_incomplete_array() {
+        // Array header but missing elements
+        assert!(parse_resp(b"*3\r\n$3\r\nSET\r\n").unwrap().is_none());
+        assert!(parse_resp(b"*3\r\n").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_null_bulk_string() {
+        let (val, n) = parse_resp(b"$-1\r\n").unwrap().unwrap();
+        assert_eq!(val, RespValue::Bulk(None));
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn test_null_array() {
+        let (val, n) = parse_resp(b"*-1\r\n").unwrap().unwrap();
+        assert_eq!(val, RespValue::Array(None));
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn test_empty_array() {
+        let (val, n) = parse_resp(b"*0\r\n").unwrap().unwrap();
+        assert_eq!(val, RespValue::Array(Some(vec![])));
+        assert_eq!(n, 4);
+    }
+
+    #[test]
+    fn test_error_response() {
+        let (val, _) = parse_resp(b"-ERR unknown command\r\n").unwrap().unwrap();
+        assert!(matches!(val, RespValue::Error(_)));
+        assert_eq!(val.to_command_string(), "ERR: ERR unknown command");
+    }
+
+    #[test]
+    fn test_integer_response() {
+        let (val, n) = parse_resp(b":42\r\n").unwrap().unwrap();
+        assert_eq!(val, RespValue::Integer(42));
+        assert_eq!(n, 5);
+    }
+
+    #[test]
+    fn test_nested_array() {
+        // Array containing an array
+        let input = b"*2\r\n*2\r\n$1\r\na\r\n$1\r\nb\r\n$1\r\nc\r\n";
+        let (val, _) = parse_resp(input).unwrap().unwrap();
+        assert!(matches!(val, RespValue::Array(Some(_))));
+    }
+
+    #[test]
+    fn test_pipeline_multiple_commands() {
+        // Two commands in one buffer
+        let input = b"*1\r\n$4\r\nPING\r\n*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n";
+        let (val1, n1) = parse_resp(input).unwrap().unwrap();
+        assert_eq!(val1.to_command_string(), "PING");
+        let (val2, _) = parse_resp(&input[n1..]).unwrap().unwrap();
+        assert_eq!(val2.to_command_string(), "GET key");
+    }
+
+    #[test]
+    fn test_empty_bulk_string() {
+        let (val, n) = parse_resp(b"$0\r\n\r\n").unwrap().unwrap();
+        assert_eq!(val, RespValue::Bulk(Some(vec![])));
+        assert_eq!(n, 6);
+    }
+
+    #[test]
+    fn test_malformed_type_byte() {
+        assert!(parse_resp(b"Xgarbage\r\n").is_err());
+    }
+
+    #[test]
+    fn test_partial_bytes_consumed() {
+        // Extra data after valid response
+        let input = b"+OK\r\n+EXTRA\r\n";
+        let (val, n) = parse_resp(input).unwrap().unwrap();
+        assert_eq!(val, RespValue::Simple("OK".into()));
+        assert_eq!(n, 5);
+        // Should be able to parse the second response
+        let (val2, _) = parse_resp(&input[n..]).unwrap().unwrap();
+        assert_eq!(val2, RespValue::Simple("EXTRA".into()));
+    }
 }

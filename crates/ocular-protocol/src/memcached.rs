@@ -191,4 +191,176 @@ mod tests {
         assert!(memcached_response_complete(b"VALUE k 0 3\r\nabc\r\nEND\r\n"));
         assert!(!memcached_response_complete(b"VALUE k 0 3\r\nabc\r\n"));
     }
+
+    // ─── Edge case tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_empty_input() {
+        assert!(parse_memcached_request(b"").is_none());
+        assert!(parse_memcached_response(b"").is_none());
+    }
+
+    #[test]
+    fn test_incomplete_command() {
+        assert!(!memcached_request_complete(b"get key"));
+        assert!(!memcached_request_complete(b""));
+    }
+
+    #[test]
+    fn test_pipeline_multiple_gets() {
+        // Two GET commands in one buffer
+        let buf = b"get key1\r\nget key2\r\n";
+        assert!(memcached_request_complete(buf));
+    }
+
+    #[test]
+    fn test_set_incomplete_data_block() {
+        // SET says 10 bytes but only 5 provided
+        assert!(!memcached_request_complete(b"set k 0 0 10\r\nhello"));
+    }
+
+    #[test]
+    fn test_set_complete_data_block() {
+        assert!(memcached_request_complete(b"set k 0 0 5\r\nhello\r\n"));
+    }
+
+    #[test]
+    fn test_parse_delete() {
+        assert_eq!(parse_memcached_request(b"delete mykey\r\n"), Some("DELETE mykey".into()));
+    }
+
+    #[test]
+    fn test_parse_incr() {
+        assert_eq!(parse_memcached_request(b"incr counter 1\r\n"), Some("INCR counter 1".into()));
+    }
+
+    #[test]
+    fn test_parse_decr() {
+        assert_eq!(parse_memcached_request(b"decr counter 5\r\n"), Some("DECR counter 5".into()));
+    }
+
+    #[test]
+    fn test_parse_touch() {
+        assert_eq!(parse_memcached_request(b"touch mykey 300\r\n"), Some("TOUCH mykey 300".into()));
+    }
+
+    #[test]
+    fn test_parse_stats() {
+        assert_eq!(parse_memcached_request(b"stats\r\n"), Some("STATS".into()));
+    }
+
+    #[test]
+    fn test_parse_version() {
+        assert_eq!(parse_memcached_request(b"version\r\n"), Some("VERSION".into()));
+    }
+
+    #[test]
+    fn test_parse_quit() {
+        assert_eq!(parse_memcached_request(b"quit\r\n"), Some("QUIT".into()));
+    }
+
+    #[test]
+    fn test_parse_add() {
+        let req = b"add newkey 0 60 3\r\nabc\r\n";
+        let result = parse_memcached_request(req).unwrap();
+        assert!(result.starts_with("ADD"));
+    }
+
+    #[test]
+    fn test_parse_replace() {
+        let req = b"replace oldkey 0 60 3\r\nxyz\r\n";
+        let result = parse_memcached_request(req).unwrap();
+        assert!(result.starts_with("REPLACE"));
+    }
+
+    #[test]
+    fn test_parse_response_not_stored() {
+        assert_eq!(parse_memcached_response(b"NOT_STORED\r\n"), Some("NOT_STORED".into()));
+    }
+
+    #[test]
+    fn test_parse_response_exists() {
+        assert_eq!(parse_memcached_response(b"EXISTS\r\n"), Some("EXISTS".into()));
+    }
+
+    #[test]
+    fn test_parse_response_not_found() {
+        assert_eq!(parse_memcached_response(b"NOT_FOUND\r\n"), Some("NOT_FOUND".into()));
+    }
+
+    #[test]
+    fn test_parse_response_deleted() {
+        assert_eq!(parse_memcached_response(b"DELETED\r\n"), Some("DELETED".into()));
+    }
+
+    #[test]
+    fn test_parse_response_end() {
+        assert_eq!(parse_memcached_response(b"END\r\n"), Some("(empty)".into()));
+    }
+
+    #[test]
+    fn test_parse_response_version() {
+        assert_eq!(parse_memcached_response(b"VERSION 1.6.22\r\n"), Some("VERSION 1.6.22".into()));
+    }
+
+    #[test]
+    fn test_parse_response_incr_result() {
+        assert_eq!(parse_memcached_response(b"42\r\n"), Some("42".into()));
+    }
+
+    #[test]
+    fn test_parse_response_error() {
+        assert_eq!(parse_memcached_response(b"ERROR\r\n"), Some("ERROR".into()));
+    }
+
+    #[test]
+    fn test_parse_response_server_error() {
+        assert_eq!(parse_memcached_response(b"SERVER_ERROR out of memory\r\n"), Some("SERVER_ERROR out of memory".into()));
+    }
+
+    #[test]
+    fn test_parse_response_client_error() {
+        assert_eq!(parse_memcached_response(b"CLIENT_ERROR bad command\r\n"), Some("CLIENT_ERROR bad command".into()));
+    }
+
+    #[test]
+    fn test_response_complete_stat() {
+        let resp = b"STAT pid 1234\r\nSTAT uptime 500\r\nEND\r\n";
+        assert!(memcached_response_complete(resp));
+    }
+
+    #[test]
+    fn test_response_complete_single_line() {
+        assert!(memcached_response_complete(b"OK\r\n"));
+        assert!(!memcached_response_complete(b"OK"));
+    }
+
+    #[test]
+    fn test_format_response_detail_value() {
+        let resp = b"VALUE k1 0 3\r\nabc\r\nVALUE k2 0 3\r\nxyz\r\nEND\r\n";
+        let detail = format_memcached_response_detail(resp).unwrap();
+        assert!(detail.contains("VALUE k1"));
+        assert!(detail.contains("abc"));
+        assert!(detail.contains("VALUE k2"));
+    }
+
+    #[test]
+    fn test_format_response_detail_stats() {
+        let resp = b"STAT pid 1234\r\nSTAT version 1.6\r\nEND\r\n";
+        let detail = format_memcached_response_detail(resp).unwrap();
+        assert!(detail.contains("STAT pid"));
+        assert!(detail.contains("STAT version"));
+    }
+
+    #[test]
+    fn test_parse_gets() {
+        assert_eq!(parse_memcached_request(b"gets key1 key2\r\n"), Some("gets key1 key2".into()));
+    }
+
+    #[test]
+    fn test_parse_multiple_values() {
+        let resp = b"VALUE k1 0 3\r\nabc\r\nVALUE k2 0 3\r\ndef\r\nVALUE k3 0 3\r\nghi\r\nEND\r\n";
+        let result = parse_memcached_response(resp).unwrap();
+        assert!(result.contains("3 values"));
+    }
 }
