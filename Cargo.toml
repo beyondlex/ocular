@@ -29,3 +29,4 @@ flate2 = "1.0"
 snap = "1.1"
 lz4_flex = "0.11"
 zstd = "0.13"
+criterion = { version = "0.5", features = ["html_reports"] }

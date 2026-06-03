@@ -65,6 +65,36 @@ cargo clippy         # Lint
 RUST_LOG=debug cargo run  # Run with debug logging
 ```
 
+## Performance Benchmarks
+
+Ocular includes Criterion benchmarks for all protocol parsers to track performance regressions:
+
+```bash
+# Run all benchmarks
+cargo bench
+
+# Run specific protocol benchmarks
+cargo bench --bench protocol_parsers -- resp      # Redis RESP only
+cargo bench --bench protocol_parsers -- mysql     # MySQL only
+cargo bench --bench protocol_parsers -- mongodb   # MongoDB BSON only
+
+# Save baseline for regression detection
+cargo bench -- --save-baseline main
+
+# Compare against baseline
+cargo bench -- --baseline main
+```
+
+Benchmark results are saved to `target/criterion/` with HTML reports. Key benchmarks include:
+
+- **RESP parsing** — simple strings, arrays, nested structures, bulk operations
+- **MySQL request/response** — query parsing, result set extraction
+- **MongoDB BSON** — document traversal with BsonIter, field extraction
+- **Kafka frames** — frame parsing, RecordBatch decompression
+- **HTTP** — request/response parsing, chunked transfer encoding
+
+When modifying protocol parsers, run benchmarks to ensure no performance regression.
+
 ## Testing
 
 The `testing/` directory contains Docker Compose services and CRUD scripts for each protocol:
