@@ -1,5 +1,5 @@
 use anyhow::Result;
-use ocular_protocol::{Protocol, mysql::mysql_response_complete, postgres::postgres_response_complete, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len};
+use ocular_protocol::{Protocol, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len, ProtocolHandler};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -84,6 +84,213 @@ pub async fn run_proxy(
     Ok(())
 }
 
+// ─── Buffer managers ────────────────────────────────────────────────────────
+
+/// Unified request buffer manager for protocols that need request buffering
+/// (HTTP, Memcached, Kafka). Handles accumulation, completeness checks,
+/// parsing, and pipeline handling (Memcached emits prev pending as standalone).
+struct ReqBufMgr {
+    buf: Vec<u8>,
+}
+
+impl ReqBufMgr {
+    fn new() -> Self {
+        Self { buf: Vec::with_capacity(4096) }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process(
+        &mut self,
+        data: &[u8],
+        protocol: Protocol,
+        handler: &'static dyn ProtocolHandler,
+        pending: &Arc<Mutex<Option<PendingRequest>>>,
+        tx: &broadcast::Sender<ProxyEvent>,
+        name: &str,
+        process: &Option<String>,
+        src: &str,
+        dest: &str,
+    ) {
+        self.buf.extend_from_slice(data);
+        while handler.request_complete(&self.buf) {
+            // Emit previous pending as standalone (Memcached pipeline support)
+            if let Some(prev) = pending.lock().unwrap().take() {
+                let _ = tx.send(ProxyEvent {
+                    timestamp: prev.timestamp,
+                    component: name.to_string(),
+                    protocol,
+                    command: prev.command,
+                    full_command: prev.full_command,
+                    response: String::new(),
+                    response_detail: String::new(),
+                    latency: Duration::ZERO,
+                    process: process.clone(),
+                    src: Some(src.to_string()),
+                    dest: Some(dest.to_string()),
+                    system: false,
+                });
+            }
+            // Parse new request
+            if let Some(command) = parse_request(protocol, &self.buf) {
+                let full_command = extract_full_command(protocol, &self.buf)
+                    .unwrap_or_else(|| command.clone());
+                *pending.lock().unwrap() = Some(PendingRequest {
+                    timestamp: SystemTime::now(),
+                    instant: Instant::now(),
+                    command,
+                    full_command,
+                });
+            }
+            // Advance past consumed bytes
+            let consumed = self.consumed_len(protocol, handler);
+            if consumed > 0 && consumed <= self.buf.len() {
+                self.buf.drain(..consumed);
+            } else {
+                self.buf.clear();
+            }
+        }
+    }
+
+    /// Determine how many bytes were consumed by the last complete message.
+    fn consumed_len(&self, protocol: Protocol, handler: &'static dyn ProtocolHandler) -> usize {
+        match protocol {
+            Protocol::Kafka => {
+                if self.buf.len() >= 4 {
+                    (i32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize) + 4
+                } else {
+                    self.buf.len()
+                }
+            }
+            Protocol::Memcached => {
+                // Advance past command line + data block
+                let s = std::str::from_utf8(&self.buf).unwrap_or("");
+                let first_crlf = s.find("\r\n").unwrap_or(0);
+                let line = &s[..first_crlf];
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let cmd = parts.first().map(|c| c.to_uppercase()).unwrap_or_default();
+                match cmd.as_str() {
+                    "SET" | "ADD" | "REPLACE" | "APPEND" | "PREPEND" | "CAS" => {
+                        let bytes: usize = parts.get(4).and_then(|b| b.parse().ok()).unwrap_or(0);
+                        first_crlf + 2 + bytes + 2
+                    }
+                    _ => first_crlf + 2,
+                }
+            }
+            _ => {
+                // HTTP and others: clear entire buffer
+                let _ = handler;
+                self.buf.len()
+            }
+        }
+    }
+}
+
+/// Unified response buffer manager for protocols that need response buffering
+/// (MySQL, HTTP, Memcached, Kafka, Postgres). Handles accumulation,
+/// completeness checks, and event emission.
+struct RespBufMgr {
+    buf: Vec<u8>,
+}
+
+impl RespBufMgr {
+    fn new() -> Self {
+        Self { buf: Vec::with_capacity(4096) }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn process(
+        &mut self,
+        data: &[u8],
+        protocol: Protocol,
+        handler: &'static dyn ProtocolHandler,
+        pending: &Arc<Mutex<Option<PendingRequest>>>,
+        tx: &broadcast::Sender<ProxyEvent>,
+        name: &str,
+        process: &Option<String>,
+        src: &str,
+        dest: &str,
+    ) -> bool {
+        self.buf.extend_from_slice(data);
+        if handler.response_complete(&self.buf) {
+            if let Some(req) = pending.lock().unwrap().take() {
+                let latency = req.instant.elapsed();
+                // For Kafka, parse only the first frame
+                let parse_buf = if protocol == Protocol::Kafka && self.buf.len() >= 4 {
+                    let frame_len = (i32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize) + 4;
+                    &self.buf[..frame_len.min(self.buf.len())]
+                } else {
+                    &self.buf
+                };
+                let response = parse_response(protocol, parse_buf).unwrap_or_default();
+                let response_detail = format_response_detail(protocol, parse_buf)
+                    .unwrap_or_else(|| response.clone());
+                let _ = tx.send(ProxyEvent {
+                    timestamp: req.timestamp,
+                    component: name.to_string(),
+                    protocol,
+                    command: req.command,
+                    full_command: req.full_command,
+                    response,
+                    response_detail,
+                    latency,
+                    process: process.clone(),
+                    src: Some(src.to_string()),
+                    dest: Some(dest.to_string()),
+                    system: false,
+                });
+            }
+            self.buf.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Scan buffer for multiple complete frames, emitting one event per frame.
+    /// Used by Kafka.
+    #[allow(clippy::too_many_arguments)]
+    fn process_kafka(
+        &mut self,
+        data: &[u8],
+        protocol: Protocol,
+        handler: &'static dyn ProtocolHandler,
+        pending: &Arc<Mutex<Option<PendingRequest>>>,
+        tx: &broadcast::Sender<ProxyEvent>,
+        name: &str,
+        process: &Option<String>,
+        src: &str,
+        dest: &str,
+    ) {
+        self.buf.extend_from_slice(data);
+        while handler.response_complete(&self.buf) {
+            let frame_len = (i32::from_be_bytes([self.buf[0], self.buf[1], self.buf[2], self.buf[3]]) as usize) + 4;
+            if let Some(req) = pending.lock().unwrap().take() {
+                let latency = req.instant.elapsed();
+                let response = parse_response(protocol, &self.buf[..frame_len]).unwrap_or_default();
+                let response_detail = format_response_detail(protocol, &self.buf[..frame_len])
+                    .unwrap_or_else(|| response.clone());
+                let _ = tx.send(ProxyEvent {
+                    timestamp: req.timestamp,
+                    component: name.to_string(),
+                    protocol,
+                    command: req.command,
+                    full_command: req.full_command,
+                    response,
+                    response_detail,
+                    latency,
+                    process: process.clone(),
+                    src: Some(src.to_string()),
+                    dest: Some(dest.to_string()),
+                    system: false,
+                });
+            }
+            self.buf = self.buf[frame_len..].to_vec();
+        }
+    }
+
+
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_conn(
     mut client: TcpStream,
@@ -153,7 +360,6 @@ async fn handle_conn(
     }
 
     // For PostgreSQL: strip SSL by forwarding negotiation to server but replying N to client.
-    // This lets the server know the connection won't be encrypted (may affect auth requirements).
     if protocol == Protocol::Postgres {
         let mut buf = [0u8; 256];
         let n = client.read(&mut buf).await?;
@@ -163,56 +369,49 @@ async fn handle_conn(
             u32::from_be_bytes([data[4], data[5], data[6], data[7]])
         } else { 0 };
         if neg_code == 80877103 || neg_code == 80877104 {
-            // Forward negotiation to server so it knows the connection state
             sw.write_all(data).await?;
-            // Read server's response (single byte: N or S)
             let mut resp = [0u8; 1];
             let rn = sr.read(&mut resp).await?;
             if rn == 0 { return Ok(()); }
-            // Always tell client: no SSL/GSS (force plaintext for proxy to parse)
             client.write_all(b"N").await?;
         } else {
-            // Not a negotiation request, forward as Startup
             sw.write_all(data).await?;
         }
     }
 
     let (mut cr, mut cw) = client.split();
-
     let pending: Arc<Mutex<Option<PendingRequest>>> = Arc::new(Mutex::new(None));
+    let handler = ocular_protocol::get_handler(protocol);
 
     let name_req = name.to_string();
-    let name_resp = name.to_string();
     let tx_req = tx.clone();
-    let tx_resp = tx.clone();
     let pending_w = pending.clone();
     let pending_final = pending.clone();
     let pending_r = pending;
     let process_info = process;
-
     let process_req = process_info.clone();
     let src_req = src.clone();
     let dest_req = dest.clone();
     let src_resp = src.clone();
     let dest_resp = dest;
+
+    // ─── Client → Server ────────────────────────────────────────────────
+
     let client_to_server = async move {
         let mut buf = [0u8; 65536];
-        let mut http_req_buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut memcached_req_buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut kafka_req_buf: Vec<u8> = Vec::with_capacity(4096);
+        let mut req_mgr = ReqBufMgr::new();
         loop {
             let n = cr.read(&mut buf).await?;
             if n == 0 { break; }
             let data = &buf[..n];
 
             if protocol == Protocol::Amqp {
-                // AMQP: loop through all frames in this read
+                // AMQP: frame-based with custom multi-frame handling
                 let mut pos = 0;
                 while pos < data.len() {
                     let frame_data = &data[pos..];
                     let Some(flen) = amqp_frame_len(frame_data) else { break };
                     if let Some(frame) = parse_amqp_frame(frame_data) {
-                        // Skip heartbeat — not a real request
                         if frame.frame_type == 8 {
                             pos += flen;
                             continue;
@@ -229,11 +428,11 @@ async fn handle_conn(
                                     full_command: detail.clone(),
                                     response: String::new(),
                                     response_detail: detail,
-                                    latency: std::time::Duration::ZERO,
+                                    latency: Duration::ZERO,
                                     process: process_req.clone(),
                                     src: Some(src_req.clone()),
                                     dest: Some(dest_req.clone()),
-                    system: false,
+                                    system: false,
                                 });
                             } else {
                                 debug!(component = %name_req, command = %method.summary);
@@ -248,83 +447,8 @@ async fn handle_conn(
                     }
                     pos += flen;
                 }
-            } else if protocol == Protocol::Http {
-                http_req_buf.extend_from_slice(data);
-                if ocular_protocol::http::http_request_complete(&http_req_buf) {
-                    if let Some(command) = parse_request(protocol, &http_req_buf) {
-                        let full_command = extract_full_command(protocol, &http_req_buf).unwrap_or_else(|| command.clone());
-                        *pending_w.lock().unwrap() = Some(PendingRequest {
-                            timestamp: SystemTime::now(),
-                            instant: Instant::now(),
-                            command,
-                            full_command,
-                        });
-                    }
-                    http_req_buf.clear();
-                }
-            } else if protocol == Protocol::Memcached {
-                memcached_req_buf.extend_from_slice(data);
-                while ocular_protocol::memcached::memcached_request_complete(&memcached_req_buf) {
-                    // If there's already a pending request that won't get a response pairing,
-                    // emit it as a standalone event
-                    if let Some(prev) = pending_w.lock().unwrap().take() {
-                        let _ = tx_req.send(ProxyEvent {
-                            timestamp: prev.timestamp,
-                            component: name_req.clone(),
-                            protocol,
-                            command: prev.command,
-                            full_command: prev.full_command,
-                            response: String::new(),
-                            response_detail: String::new(),
-                            latency: Duration::ZERO,
-                            process: process_req.clone(),
-                            src: Some(src_req.clone()),
-                            dest: Some(dest_req.clone()),
-                            system: false,
-                        });
-                    }
-                    if let Some(command) = parse_request(protocol, &memcached_req_buf) {
-                        let full_command = extract_full_command(protocol, &memcached_req_buf).unwrap_or_else(|| command.clone());
-                        *pending_w.lock().unwrap() = Some(PendingRequest {
-                            timestamp: SystemTime::now(),
-                            instant: Instant::now(),
-                            command,
-                            full_command,
-                        });
-                    }
-                    // Advance past this request
-                    let s = std::str::from_utf8(&memcached_req_buf).unwrap_or("");
-                    let first_crlf = s.find("\r\n").unwrap_or(0);
-                    let line = &s[..first_crlf];
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    let cmd = parts.first().map(|c| c.to_uppercase()).unwrap_or_default();
-                    let consumed = match cmd.as_str() {
-                        "SET" | "ADD" | "REPLACE" | "APPEND" | "PREPEND" | "CAS" => {
-                            let bytes: usize = parts.get(4).and_then(|b| b.parse().ok()).unwrap_or(0);
-                            first_crlf + 2 + bytes + 2
-                        }
-                        _ => first_crlf + 2,
-                    };
-                    memcached_req_buf = memcached_req_buf[consumed..].to_vec();
-                }
-            } else if protocol == Protocol::Kafka {
-                kafka_req_buf.extend_from_slice(data);
-                while ocular_protocol::kafka::kafka_frame_complete(&kafka_req_buf) {
-                    let frame_len = i32::from_be_bytes([kafka_req_buf[0], kafka_req_buf[1], kafka_req_buf[2], kafka_req_buf[3]]) as usize + 4;
-                    let frame = &kafka_req_buf[..frame_len];
-                    if let Some(command) = parse_request(protocol, frame) {
-                        let full_command = extract_full_command(protocol, frame).unwrap_or_else(|| command.clone());
-                        *pending_w.lock().unwrap() = Some(PendingRequest {
-                            timestamp: SystemTime::now(),
-                            instant: Instant::now(),
-                            command,
-                            full_command,
-                        });
-                    }
-                    kafka_req_buf = kafka_req_buf[frame_len..].to_vec();
-                }
             } else if protocol == Protocol::Postgres {
-                // Postgres: scan all messages in this read, keep SQL from Q/P only
+                // Postgres: scan typed messages, only Q/P set pending
                 let mut pos = 0;
                 while pos < data.len() {
                     let first = data[pos];
@@ -334,11 +458,11 @@ async fn handle_conn(
                     let len = u32::from_be_bytes([data[pos+1], data[pos+2], data[pos+3], data[pos+4]]) as usize;
                     let end = pos + 1 + len;
                     if end > data.len() { break; }
-                    // Only set pending for Q (simple query) or P (Parse with SQL)
                     if first == b'Q' || first == b'P' {
                         let msg = &data[pos..end];
                         if let Some(command) = parse_request(protocol, msg) {
-                            let full_command = extract_full_command(protocol, msg).unwrap_or_else(|| command.clone());
+                            let full_command = extract_full_command(protocol, msg)
+                                .unwrap_or_else(|| command.clone());
                             *pending_w.lock().unwrap() = Some(PendingRequest {
                                 timestamp: SystemTime::now(),
                                 instant: Instant::now(),
@@ -349,15 +473,23 @@ async fn handle_conn(
                     }
                     pos = end;
                 }
-            } else if let Some(command) = parse_request(protocol, data) {
-                let full_command = extract_full_command(protocol, data).unwrap_or_else(|| command.clone());
-                debug!(component = %name_req, %command);
-                *pending_w.lock().unwrap() = Some(PendingRequest {
-                    timestamp: SystemTime::now(),
-                    instant: Instant::now(),
-                    command,
-                    full_command,
-                });
+            } else if handler.needs_request_buffering() {
+                // Unified buffered: HTTP, Memcached, Kafka
+                req_mgr.process(data, protocol, handler, &pending_w, &tx_req,
+                    &name_req, &process_req, &src_req, &dest_req);
+            } else {
+                // Default: single request per read (Redis, MongoDB)
+                if let Some(command) = parse_request(protocol, data) {
+                    let full_command = extract_full_command(protocol, data)
+                        .unwrap_or_else(|| command.clone());
+                    debug!(component = %name_req, %command);
+                    *pending_w.lock().unwrap() = Some(PendingRequest {
+                        timestamp: SystemTime::now(),
+                        instant: Instant::now(),
+                        command,
+                        full_command,
+                    });
+                }
             }
 
             sw.write_all(data).await?;
@@ -365,88 +497,28 @@ async fn handle_conn(
         Ok::<_, anyhow::Error>(())
     };
 
-    let process_mysql = process_info.clone();
+    // ─── Server → Client ────────────────────────────────────────────────
+
     let server_to_client = async move {
         let mut buf = [0u8; 65536];
-        let mut mysql_buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut http_resp_buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut memcached_resp_buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut kafka_resp_buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut pg_resp_buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut awaiting_response = false;
-        let mut memcached_awaiting = false;
+        let mut resp_mgr = RespBufMgr::new();
         loop {
             let n = sr.read(&mut buf).await?;
             if n == 0 { break; }
             let data = &buf[..n];
             cw.write_all(data).await?;
 
-            if protocol == Protocol::Mysql {
-                let has_pending = pending_r.lock().unwrap().is_some();
-                if has_pending || awaiting_response {
-                    awaiting_response = true;
-                    mysql_buf.extend_from_slice(data);
-                    if mysql_response_complete(&mysql_buf) {
-                        if let Some(req) = pending_r.lock().unwrap().take() {
-                            let latency = req.instant.elapsed();
-                            let response = parse_response(protocol, &mysql_buf).unwrap_or_default();
-                            let response_detail = format_response_detail(protocol, &mysql_buf).unwrap_or_default();
-                            let _ = tx_resp.send(ProxyEvent {
-                                timestamp: req.timestamp,
-                                component: name_resp.clone(),
-                                protocol,
-                                command: req.command,
-                                full_command: req.full_command,
-                                response,
-                                response_detail,
-                                latency,
-                                process: process_mysql.clone(),
-                                src: Some(src_resp.clone()),
-                                dest: Some(dest_resp.clone()),
-                    system: false,
-                            });
-                        }
-                        mysql_buf.clear();
-                        awaiting_response = false;
-                    }
-                }
-            } else if protocol == Protocol::Http {
-                http_resp_buf.extend_from_slice(data);
-                if ocular_protocol::http::http_response_complete(&http_resp_buf) {
-                    if let Some(req) = pending_r.lock().unwrap().take() {
-                        let latency = req.instant.elapsed();
-                        let response = parse_response(protocol, &http_resp_buf).unwrap_or_default();
-                        let response_detail = format_response_detail(protocol, &http_resp_buf).unwrap_or_else(|| response.clone());
-                        let _ = tx_resp.send(ProxyEvent {
-                            timestamp: req.timestamp,
-                            component: name_resp.clone(),
-                            protocol,
-                            command: req.command,
-                            full_command: req.full_command,
-                            response,
-                            response_detail,
-                            latency,
-                            process: process_info.clone(),
-                                    src: Some(src_resp.clone()),
-                                    dest: Some(dest_resp.clone()),
-                    system: false,
-                        });
-                    }
-                    http_resp_buf.clear();
-                }
-            } else if protocol == Protocol::Amqp {
-                // AMQP: loop through all server frames
+            if protocol == Protocol::Amqp {
+                // AMQP: frame-based with body extraction and server-initiated handling
                 let mut pos = 0;
                 while pos < data.len() {
                     let frame_data = &data[pos..];
                     let Some(flen) = amqp_frame_len(frame_data) else { break };
                     if let Some(frame) = parse_amqp_frame(frame_data) {
-                        // Skip content header and body frames — handled below with method
                         if frame.frame_type == 2 || frame.frame_type == 3 {
                             pos += flen;
                             continue;
                         }
-                        // Heartbeat: skip
                         if frame.frame_type == 8 {
                             pos += flen;
                             continue;
@@ -461,9 +533,8 @@ async fn handle_conn(
                         let Some(plen) = amqp_frame_len(peek_data) else { break };
                         if let Some(pf) = parse_amqp_frame(peek_data) {
                             if pf.frame_type == 2 {
-                                // Header frame, skip
+                                // Header frame
                             } else if pf.frame_type == 3 {
-                                // Body frame
                                 if let Some(body) = &pf.body {
                                     body_text = String::from_utf8_lossy(body).to_string();
                                 }
@@ -479,61 +550,15 @@ async fn handle_conn(
                     if let Some(req) = pending_r.lock().unwrap().take() {
                         let latency = req.instant.elapsed();
                         let mut response = parse_response(protocol, frame_data).unwrap_or_default();
-                        let mut response_detail = format_response_detail(protocol, frame_data).unwrap_or_else(|| response.clone());
+                        let mut response_detail = format_response_detail(protocol, frame_data)
+                            .unwrap_or_else(|| response.clone());
                         if !body_text.is_empty() {
                             response = format!("{} | {}", response, body_text);
                             response_detail = format!("{}\nBody: {}", response_detail, body_text);
                         }
-                        let _ = tx_resp.send(ProxyEvent {
+                        let _ = tx.send(ProxyEvent {
                             timestamp: req.timestamp,
-                            component: name_resp.clone(),
-                            protocol,
-                            command: req.command,
-                            full_command: req.full_command,
-                            response,
-                            response_detail,
-                            latency,
-                            process: process_info.clone(),
-                                    src: Some(src_resp.clone()),
-                                    dest: Some(dest_resp.clone()),
-                    system: false,
-                        });
-                    } else if let Some(frame) = parse_amqp_frame(frame_data) {
-                        // Server-initiated method (e.g. Basic.Deliver) — emit as standalone
-                        if let Some(ref method) = frame.method {
-                            let response = if body_text.is_empty() { String::new() } else { body_text.clone() };
-                            let response_detail = if body_text.is_empty() { String::new() } else { body_text.clone() };
-                            let command = method.summary.clone();
-                            let _ = tx_resp.send(ProxyEvent {
-                                timestamp: SystemTime::now(),
-                                component: name_resp.clone(),
-                                protocol,
-                                command,
-                                full_command: method.detail.clone(),
-                                response,
-                                response_detail,
-                                latency: std::time::Duration::ZERO,
-                                process: process_info.clone(),
-                                    src: Some(dest_resp.clone()),
-                                    dest: Some(src_resp.clone()),
-                    system: false,
-                            });
-                        }
-                    }
-                    // Advance past the method frame + any header/body frames we consumed
-                    pos = peek;
-                }
-            } else if protocol == Protocol::Postgres {
-                // Buffer until ReadyForQuery, then emit single event
-                pg_resp_buf.extend_from_slice(data);
-                if postgres_response_complete(&pg_resp_buf) {
-                    if let Some(req) = pending_r.lock().unwrap().take() {
-                        let latency = req.instant.elapsed();
-                        let response = parse_response(protocol, &pg_resp_buf).unwrap_or_default();
-                        let response_detail = format_response_detail(protocol, &pg_resp_buf).unwrap_or_else(|| response.clone());
-                        let _ = tx_resp.send(ProxyEvent {
-                            timestamp: req.timestamp,
-                            component: name_resp.clone(),
+                            component: name.to_string(),
                             protocol,
                             command: req.command,
                             full_command: req.full_command,
@@ -545,72 +570,48 @@ async fn handle_conn(
                             dest: Some(dest_resp.clone()),
                             system: false,
                         });
-                    }
-                    pg_resp_buf.clear();
-                }
-            } else if protocol == Protocol::Memcached {
-                let has_pending = pending_r.lock().unwrap().is_some();
-                if has_pending || memcached_awaiting {
-                    memcached_awaiting = true;
-                    memcached_resp_buf.extend_from_slice(data);
-                    if ocular_protocol::memcached::memcached_response_complete(&memcached_resp_buf) {
-                        if let Some(req) = pending_r.lock().unwrap().take() {
-                            let latency = req.instant.elapsed();
-                            let response = parse_response(protocol, &memcached_resp_buf).unwrap_or_default();
-                            let response_detail = format_response_detail(protocol, &memcached_resp_buf).unwrap_or_else(|| response.clone());
-                            let _ = tx_resp.send(ProxyEvent {
-                                timestamp: req.timestamp,
-                                component: name_resp.clone(),
+                    } else if let Some(frame) = parse_amqp_frame(frame_data) {
+                        // Server-initiated method (e.g. Basic.Deliver)
+                        if let Some(ref method) = frame.method {
+                            let response = if body_text.is_empty() { String::new() } else { body_text.clone() };
+                            let response_detail = if body_text.is_empty() { String::new() } else { body_text.clone() };
+                            let command = method.summary.clone();
+                            let _ = tx.send(ProxyEvent {
+                                timestamp: SystemTime::now(),
+                                component: name.to_string(),
                                 protocol,
-                                command: req.command,
-                                full_command: req.full_command,
+                                command,
+                                full_command: method.detail.clone(),
                                 response,
                                 response_detail,
-                                latency,
+                                latency: Duration::ZERO,
                                 process: process_info.clone(),
-                                src: Some(src_resp.clone()),
-                                dest: Some(dest_resp.clone()),
-                    system: false,
+                                src: Some(dest_resp.clone()),
+                                dest: Some(src_resp.clone()),
+                                system: false,
                             });
                         }
-                        memcached_resp_buf.clear();
-                        memcached_awaiting = false;
                     }
+                    pos = peek;
                 }
             } else if protocol == Protocol::Kafka {
-                kafka_resp_buf.extend_from_slice(data);
-                while ocular_protocol::kafka::kafka_frame_complete(&kafka_resp_buf) {
-                    let frame_len = i32::from_be_bytes([kafka_resp_buf[0], kafka_resp_buf[1], kafka_resp_buf[2], kafka_resp_buf[3]]) as usize + 4;
-                    if let Some(req) = pending_r.lock().unwrap().take() {
-                        let latency = req.instant.elapsed();
-                        let response = parse_response(protocol, &kafka_resp_buf[..frame_len]).unwrap_or_default();
-                        let response_detail = format_response_detail(protocol, &kafka_resp_buf[..frame_len]).unwrap_or_else(|| response.clone());
-                        let _ = tx_resp.send(ProxyEvent {
-                            timestamp: req.timestamp,
-                            component: name_resp.clone(),
-                            protocol,
-                            command: req.command,
-                            full_command: req.full_command,
-                            response,
-                            response_detail,
-                            latency,
-                            process: process_info.clone(),
-                            src: Some(src_resp.clone()),
-                            dest: Some(dest_resp.clone()),
-                    system: false,
-                        });
-                    }
-                    kafka_resp_buf = kafka_resp_buf[frame_len..].to_vec();
-                }
+                // Kafka: scan frames, emit per frame
+                resp_mgr.process_kafka(data, protocol, handler, &pending_r, tx,
+                    name, &process_info, &src_resp, &dest_resp);
+            } else if handler.needs_response_buffering() {
+                // Unified buffered: MySQL, HTTP, Memcached, Postgres
+                resp_mgr.process(data, protocol, handler, &pending_r, tx,
+                    name, &process_info, &src_resp, &dest_resp);
             } else {
-                // Redis/MongoDB: single request/response per read
+                // Default: single response per read (Redis, MongoDB)
                 if let Some(req) = pending_r.lock().unwrap().take() {
                     let latency = req.instant.elapsed();
                     let response = parse_response(protocol, data).unwrap_or_default();
-                    let response_detail = format_response_detail(protocol, data).unwrap_or_else(|| response.clone());
-                    let _ = tx_resp.send(ProxyEvent {
+                    let response_detail = format_response_detail(protocol, data)
+                        .unwrap_or_else(|| response.clone());
+                    let _ = tx.send(ProxyEvent {
                         timestamp: req.timestamp,
-                        component: name_resp.clone(),
+                        component: name.to_string(),
                         protocol,
                         command: req.command,
                         full_command: req.full_command,
@@ -620,7 +621,7 @@ async fn handle_conn(
                         process: process_info.clone(),
                         src: Some(src_resp.clone()),
                         dest: Some(dest_resp.clone()),
-                    system: false,
+                        system: false,
                     });
                 }
             }
@@ -669,8 +670,6 @@ fn resolve_peer_process(port: u16) -> Option<String> {
     let my_pid = std::process::id().to_string();
 
     if cfg!(target_os = "macos") {
-        // lsof -i tcp:PORT -sTCP:ESTABLISHED -Fp -Fc
-        // Returns multiple process entries; skip our own PID
         let output = Command::new("lsof")
             .args(["-i", &format!("tcp:{}", port), "-sTCP:ESTABLISHED", "-Fp", "-Fc"])
             .output()
@@ -680,7 +679,6 @@ fn resolve_peer_process(port: u16) -> Option<String> {
         let mut current_cmd = String::new();
         for line in text.lines() {
             if let Some(p) = line.strip_prefix('p') {
-                // Save previous entry if it wasn't us
                 if !current_pid.is_empty() && current_pid != my_pid {
                     return Some(format!("[{}] {}", current_pid, current_cmd));
                 }
@@ -691,19 +689,16 @@ fn resolve_peer_process(port: u16) -> Option<String> {
                 current_cmd = c.to_string();
             }
         }
-        // Check last entry
         if !current_pid.is_empty() && current_pid != my_pid {
             return Some(format!("[{}] {}", current_pid, current_cmd));
         }
         None
     } else {
-        // Linux: ss -tnp sport = :PORT
         let output = Command::new("ss")
             .args(["-tnp", &format!("sport = :{}", port)])
             .output()
             .ok()?;
         let text = String::from_utf8_lossy(&output.stdout);
-        // Parse: users:(("process_name",pid=1234,fd=5))
         for line in text.lines() {
             if let Some(start) = line.find("users:((\"") {
                 let rest = &line[start + 9..];
@@ -775,29 +770,27 @@ mod tests {
         assert_eq!(buf[4], 9);
     }
 
-    /// Find the capability flags offset in a MySQL greeting packet
     fn caps_offset(pkt: &[u8]) -> Option<usize> {
         if pkt.len() < 5 { return None; }
         let mut pos = 5;
-        // Skip null-terminated server version
         while pos < pkt.len() && pkt[pos] != 0 { pos += 1; }
-        pos += 1; // null
+        pos += 1;
         if pos + 13 > pkt.len() { return None; }
-        pos += 4; // thread id
-        pos += 8; // salt part 1
-        pos += 1; // filler
+        pos += 4;
+        pos += 8;
+        pos += 1;
         Some(pos)
     }
 
     #[test]
     fn test_strip_mysql_ssl_flag_clears_ssl_bit() {
         let version = b"5.7.0\0";
-        let mut payload = vec![10]; // protocol version
+        let mut payload = vec![10];
         payload.extend_from_slice(version);
-        payload.extend_from_slice(&[0u8; 4]); // thread id
-        payload.extend_from_slice(&[0u8; 8]); // salt part 1
-        payload.push(0); // filler
-        let caps: u16 = 0x0800; // SSL flag set
+        payload.extend_from_slice(&[0u8; 4]);
+        payload.extend_from_slice(&[0u8; 8]);
+        payload.push(0);
+        let caps: u16 = 0x0800;
         payload.extend_from_slice(&caps.to_le_bytes());
         payload.extend_from_slice(&[0u8; 13]);
 
