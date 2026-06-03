@@ -204,17 +204,17 @@ fn format_event_raw(ev: &ProxyEvent, out: &mut impl Write) {
 fn format_event_json(ev: &ProxyEvent, out: &mut impl Write) {
     let ts: DateTime<Local> = ev.timestamp.into();
     let latency_ms = ev.latency.as_secs_f64() * 1000.0;
-    // Manual JSON to avoid adding serde_json dependency
-    let _ = writeln!(out,
-        r#"{{"timestamp":"{}","protocol":"{:?}","command":"{}","response":"{}","latency_ms":{:.2},"src":{},"dest":{}}}"#,
-        ts.format("%H:%M:%S%.3f"),
-        ev.protocol,
-        ev.full_command.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"),
-        ev.response.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n"),
-        latency_ms,
-        ev.src.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or_else(|| "null".to_string()),
-        ev.dest.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or_else(|| "null".to_string()),
-    );
+    let value = serde_json::json!({
+        "timestamp": ts.format("%H:%M:%S%.3f").to_string(),
+        "protocol": format!("{:?}", ev.protocol),
+        "command": ev.full_command,
+        "response": ev.response,
+        "latency_ms": (latency_ms * 100.0).round() / 100.0,
+        "src": ev.src,
+        "dest": ev.dest,
+    });
+    let _ = serde_json::to_writer(&mut *out, &value);
+    let _ = writeln!(out);
 }
 
 pub async fn run_cli(args: CliArgs) -> Result<()> {
