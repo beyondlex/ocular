@@ -2,7 +2,7 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 use fuzzy_matcher::FuzzyMatcher;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
 };
 use std::time::Duration;
 
@@ -773,12 +773,9 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App) {
     } else {
         Line::from(" Detail ")
     };
-    // Clamp scroll
-    let detail_view_width = right[1].width.saturating_sub(2).max(1) as usize;
-    let wrapped_lines: u16 = detail_str_for_scroll.lines()
-        .map(|l| l.chars().count().max(1).div_ceil(detail_view_width) as u16)
-        .sum();
-    let max_scroll = wrapped_lines.saturating_sub(1);
+    // Clamp scroll (logical lines, no wrapping)
+    let line_count: u16 = detail_str_for_scroll.lines().count().max(1) as u16;
+    let max_scroll = line_count.saturating_sub(1);
     app.detail_scroll = app.detail_scroll.min(max_scroll);
 
     // Split detail area: main content + 1-line sticky footer
@@ -788,7 +785,6 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App) {
         .split(right[1]);
 
     let detail_widget = Paragraph::new(detail_text)
-        .wrap(Wrap { trim: false })
         .scroll((app.detail_scroll, 0))
         .block(Block::default().borders(Borders::TOP).border_style(detail_border).title(title)
             .padding(ratatui::widgets::Padding::left(1)));
