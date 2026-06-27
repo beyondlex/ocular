@@ -388,10 +388,23 @@ pub fn format_postgres_response_detail_with_formats(buf: &[u8], bind_formats: Op
 }
 
 /// Decode a binary-encoded DataRow field value to a human-readable string.
-/// Tries common integer/float sizes, falls back to hex if unrecognised.
+///
+/// Strategy:
+/// 1. Try UTF-8 text first — many binary-format PG types (TEXT, VARCHAR, CHAR,
+///    JSON, NAME) are sent as raw UTF-8 bytes, same as their text format.
+/// 2. Only if the data has non-printable bytes (nulls, control chars), fall
+///    through to integer/float/timestamp/hex decoding by size.
 fn decode_binary_field(buf: &[u8]) -> String {
+    // Step 1: try text. Most PG types use raw UTF-8 for their binary encoding.
+    if let Ok(s) = std::str::from_utf8(buf) {
+        if !s.is_empty() && s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+            return s.to_string();
+        }
+    }
+
+    // Step 2: non-text binary — decode by size
     match buf.len() {
-        1 => format!("{}", buf[0]),
+        1 => format!("{}", buf[0]),  // boolean or tiny int
         2 => {
             let v = i16::from_be_bytes([buf[0], buf[1]]);
             format!("{}", v)
@@ -401,8 +414,8 @@ fn decode_binary_field(buf: &[u8]) -> String {
             format!("{}", v)
         }
         8 => {
-            // Could be int8 or float8 — show both to avoid misclassification
             let i = i64::from_be_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]]);
+            // Could be float8 — try to format as float if it looks plausible
             let f = f64::from_be_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]]);
             if f.is_finite() && f.to_string().len() < 20 {
                 format!("{}", f)
@@ -411,18 +424,13 @@ fn decode_binary_field(buf: &[u8]) -> String {
             }
         }
         _ => {
-            if let Ok(s) = std::str::from_utf8(buf) {
-                if s.chars().all(|c| !c.is_control() || c == '\t' || c == '\n') {
-                    return format!("'{}'", s);
-                }
-            }
-            // Try PG NUMERIC before hex fallback (min 10 bytes: 8 header + 1 digit group)
+            // Try PG NUMERIC (base-10000 encoding, min 10 bytes)
             if buf.len() >= 10 {
                 if let Some(s) = try_decode_numeric(buf) {
                     return s;
                 }
             }
-            // PostgreSQL binary array/text/json/etc. — hex dump
+            // Fallback: hex dump
             let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
             format!("<hex: {}>", hex)
         }
