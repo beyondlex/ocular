@@ -712,32 +712,11 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App) {
             }
         } else {
             // MySQL / Postgres / Redis: request, response
-            let formatted_cmd = if ev.protocol == ocular_protocol::Protocol::Mysql {
+            formatted_cmd = if ev.protocol == ocular_protocol::Protocol::Mysql {
                 format_sql(&ev.full_command)
             } else {
                 ev.full_command.clone()
             };
-            for sql_line in formatted_cmd.lines() {
-                lines.push(highlight_sql_line(sql_line));
-            }
-            // Response detail
-            if !ev.response_detail.is_empty() {
-                lines.push(Line::from(""));
-                let mut in_json = false;
-                for rd in ev.response_detail.lines() {
-                    if rd == "[Response Body]" || rd == "[Request Body]" {
-                        in_json = ev.protocol == ocular_protocol::Protocol::Http;
-                        lines.push(Line::from(Span::styled(rd.to_string(), Style::default().fg(Color::DarkGray))));
-                    } else if rd.starts_with('[') && rd.ends_with(']') {
-                        in_json = false;
-                        lines.push(Line::from(Span::styled(rd.to_string(), Style::default().fg(Color::DarkGray))));
-                    } else if in_json {
-                        lines.push(highlight_json_line(rd));
-                    } else {
-                        lines.push(Line::from(rd.to_string()));
-                    }
-                }
-            }
         }
 
         // Build metadata line
