@@ -197,11 +197,13 @@ struct RespBufMgr {
     /// Column type OIDs captured from RowDescription (Describe response).
     /// Used to decode binary fields that need type info (timestamps, bools, etc.).
     col_type_oids: Option<Vec<u32>>,
+    /// Column names captured from RowDescription, for table header rendering.
+    col_names: Option<Vec<String>>,
 }
 
 impl RespBufMgr {
     fn new() -> Self {
-        Self { buf: Vec::with_capacity(4096), col_type_oids: None }
+        Self { buf: Vec::with_capacity(4096), col_type_oids: None, col_names: None }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -230,12 +232,20 @@ impl RespBufMgr {
                 };
                 let response = parse_response(protocol, parse_buf).unwrap_or_default();
                 let response_detail = if protocol == Protocol::Postgres {
-                    // Capture/update type OIDs from RowDescription when present
+                    // Capture/update type OIDs and column names from RowDescription
                     if let Some(oids) = ocular_protocol::postgres::extract_postgres_type_oids(parse_buf) {
                         self.col_type_oids = Some(oids);
                     }
-                    format_postgres_response_detail_with_formats(parse_buf, req.result_formats.as_deref(), self.col_type_oids.as_deref())
-                        .unwrap_or_else(|| response.clone())
+                    if let Some(names) = ocular_protocol::postgres::extract_postgres_col_names(parse_buf) {
+                        self.col_names = Some(names);
+                    }
+                    format_postgres_response_detail_with_formats(
+                        parse_buf,
+                        req.result_formats.as_deref(),
+                        self.col_type_oids.as_deref(),
+                        self.col_names.as_deref(),
+                    )
+                    .unwrap_or_else(|| response.clone())
                 } else {
                     format_response_detail(protocol, parse_buf)
                         .unwrap_or_else(|| response.clone())
