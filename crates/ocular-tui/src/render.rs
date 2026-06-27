@@ -677,7 +677,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App) {
     let selected_event = filtered.get(app.selected).map(|(_, ev, _)| *ev);
     let (detail_table, detail_cmd, detail_meta): (Text, Text, Line) = if let Some(ev) = selected_event {
         let mut lines: Vec<Line> = Vec::new();
-        let mut formatted_cmd = String::new();
+        let mut formatted_cmd;
 
         if ev.protocol == ocular_protocol::Protocol::Amqp {
             // AMQP: distinguish Publish (send) vs Deliver (receive) vs request-response
