@@ -12,6 +12,7 @@ flate2.workspace = true
 snap.workspace = true
 lz4_flex.workspace = true
 zstd.workspace = true
+unicode-width = "0.2"
 
 [dev-dependencies]
 criterion.workspace = true

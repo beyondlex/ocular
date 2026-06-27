@@ -3,6 +3,8 @@
 //! Message format: [type:1][length:4 (includes self)][payload...]
 //! Startup message has no type byte: [length:4][protocol_version:4][params...]
 
+use unicode_width::UnicodeWidthStr;
+
 /// Parse a client→server message, return human-readable summary
 pub fn parse_postgres_request(buf: &[u8]) -> Option<String> {
     if buf.is_empty() { return None; }
@@ -401,11 +403,11 @@ pub fn format_postgres_response_detail_with_formats(
 
     // Compute column widths
     let _num_cols = colnames.len();
-    let mut widths: Vec<usize> = colnames.iter().map(|n| n.len()).collect();
+    let mut widths: Vec<usize> = colnames.iter().map(|n| n.width()).collect();
     for row in &rows {
         for (i, val) in row.iter().enumerate() {
             if i < widths.len() {
-                widths[i] = widths[i].max(val.len());
+                widths[i] = widths[i].max(val.as_str().width());
             }
         }
     }
@@ -432,10 +434,15 @@ pub fn format_postgres_response_detail_with_formats(
 
     // Format helpers
     fn pad(s: &str, width: usize, right: bool) -> String {
+        let sw = s.width();
+        if sw >= width {
+            return s.to_string();
+        }
+        let spaces = " ".repeat(width - sw);
         if right {
-            format!("{:>width$}", s, width = width)
+            format!("{}{}", spaces, s)
         } else {
-            format!("{:<width$}", s, width = width)
+            format!("{}{}", s, spaces)
         }
     }
 
