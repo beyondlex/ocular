@@ -225,7 +225,6 @@ impl RespBufMgr {
                 } else {
                     &self.buf
                 };
-                eprintln!("[ocular-proxy] resp_mgr: took pending, result_formats={:?}", req.result_formats);
                 let response = parse_response(protocol, parse_buf).unwrap_or_default();
                 let response_detail = if protocol == Protocol::Postgres {
                     format_postgres_response_detail_with_formats(parse_buf, req.result_formats.as_deref())
@@ -498,9 +497,7 @@ async fn handle_conn(
                             }
                         }
                         b'B' => {
-                            eprintln!("[ocular-proxy] Bind: pending before parse={:?}", pending_w.lock().unwrap().as_ref().map(|p| (&p.command, p.result_formats.is_some())));
                             if let Some(info) = parse_bind_params(payload) {
-                                eprintln!("[ocular-proxy] Bind: parse_bind_params returned result_formats={:?}", info.result_formats);
                                 debug!(component = %name_req, stmt = %info.stmt, params = ?info.params, "Bind received");
                                 if let Some(sql) = stmt_map_req.lock().unwrap().get(&info.stmt).cloned() {
                                     let mut filled = sql.clone();

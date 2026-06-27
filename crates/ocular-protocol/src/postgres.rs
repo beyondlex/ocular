@@ -258,8 +258,7 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
 /// `bind_formats`: per-column true=binary/false=text. If shorter than column count,
 /// remaining columns default to false (text). If Some(empty), all columns are text.
 pub fn format_postgres_response_detail_with_formats(buf: &[u8], bind_formats: Option<&[bool]>) -> Option<String> {
-    eprintln!("[ocular] format_detail: bind_formats={:?}", bind_formats.map(|b| b.to_vec()));
-    if buf.is_empty() { return None; }
+        if buf.is_empty() { return None; }
     // SSL response
     if buf.len() == 1 {
         return parse_postgres_response(buf);
@@ -281,8 +280,7 @@ pub fn format_postgres_response_detail_with_formats(buf: &[u8], bind_formats: Op
 
         match msg_type {
             b'T' if payload.len() >= 2 => {
-                eprintln!("[ocular] MATCH T: len={} has_bind={}", payload.len(), bind_formats.is_some());
-                // RowDescription - extract column names and format codes
+                                // RowDescription - extract column names and format codes
                 let col_count = u16::from_be_bytes([payload[0], payload[1]]) as usize;
                     let mut p = 2;
                     let mut cols = Vec::new();
@@ -310,9 +308,7 @@ pub fn format_postgres_response_detail_with_formats(buf: &[u8], bind_formats: Op
                     //   bind_formats.len() == 1 → single format for ALL columns
                     //   bind_formats.len() >= 2 → per-column format; remaining default text
                     if let Some(bind_fmts) = bind_formats {
-                        eprintln!("[ocular] override_formats: rd={:?} bind={:?}",
-                            col_formats, bind_fmts);
-                        if bind_fmts.len() == 1 {
+                                                if bind_fmts.len() == 1 {
                             let all = bind_fmts[0];
                             for fmt in col_formats.iter_mut() {
                                 *fmt = all;
@@ -363,7 +359,6 @@ pub fn format_postgres_response_detail_with_formats(buf: &[u8], bind_formats: Op
                                     } else {
                                         fields.push(String::from_utf8_lossy(&payload[p..end]).to_string());
                                     }
-                                    eprintln!("[ocular] col[{}] binary={} len={} raw={:02x?} text={}", i, is_binary, flen, &payload[p..end], fields.last().unwrap());
                                 }
                                 p = end;
                             }
@@ -421,11 +416,87 @@ fn decode_binary_field(buf: &[u8]) -> String {
                     return format!("'{}'", s);
                 }
             }
+            // Try PG NUMERIC before hex fallback (min 10 bytes: 8 header + 1 digit group)
+            if buf.len() >= 10 {
+                if let Some(s) = try_decode_numeric(buf) {
+                    return s;
+                }
+            }
             // PostgreSQL binary array/text/json/etc. — hex dump
             let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
             format!("<hex: {}>", hex)
         }
     }
+}
+
+/// Attempt to decode a PostgreSQL NUMERIC binary value.
+/// Format: ndigits(i16) | weight(i16) | sign(i16) | dscale(i16) | digits(i16×ndigits)
+fn try_decode_numeric(buf: &[u8]) -> Option<String> {
+    if buf.len() < 8 || (buf.len() - 8) % 2 != 0 {
+        return None;
+    }
+    let ndigits = u16::from_be_bytes([buf[0], buf[1]]) as usize;
+    if 8 + ndigits * 2 != buf.len() {
+        return None;
+    }
+    if ndigits == 0 {
+        return None;
+    }
+    let weight = i16::from_be_bytes([buf[2], buf[3]]);
+    let sign = u16::from_be_bytes([buf[4], buf[5]]);
+    let dscale = u16::from_be_bytes([buf[6], buf[7]]);
+
+    if sign != 0x0000 && sign != 0x4000 && sign != 0xC000 {
+        return None;
+    }
+    if sign == 0xC000 {
+        return Some("NaN".into());
+    }
+    let negative = sign == 0x4000;
+    if dscale > 1000 {
+        return None;
+    }
+
+    let digits: Vec<u16> = (0..ndigits)
+        .map(|i| u16::from_be_bytes([buf[8 + i * 2], buf[8 + i * 2 + 1]]))
+        .collect();
+    if digits.iter().any(|&d| d > 9999) {
+        return None;
+    }
+
+    // Build base-10000 digit string — pad fractional groups to 4 chars
+    let mut groups: Vec<String> = Vec::with_capacity(ndigits);
+    for (i, &d) in digits.iter().enumerate() {
+        if i == 0 && weight >= 0 {
+            groups.push(d.to_string()); // first integer group: no leading zeros
+        } else {
+            groups.push(format!("{:04}", d));
+        }
+    }
+    let all = groups.join("");
+
+    let int_groups = if weight >= 0 { (weight + 1) as usize } else { 0 };
+    let mut int_end = 0usize;
+    for i in 0..int_groups.min(ndigits) {
+        int_end += groups[i].len();
+    }
+
+    let mut int_str = if int_end > 0 {
+        all[..int_end].trim_start_matches('0').to_string()
+    } else { String::new() };
+    if int_str.is_empty() { int_str = "0".to_string(); }
+    let mut frac = if int_end < all.len() {
+        all[int_end..].to_string()
+    } else { String::new() };
+
+    while (frac.len() as u16) < dscale { frac.push('0'); }
+    if (frac.len() as u16) > dscale { frac.truncate(dscale as usize); }
+
+    Some(if negative {
+        format!("-{}.{}", int_str, frac)
+    } else {
+        format!("{}.{}", int_str, frac)
+    })
 }
 
 /// Check if a PostgreSQL response is complete (ends with ReadyForQuery 'Z')
@@ -1128,5 +1199,59 @@ mod tests {
         // col_formats is empty → default to text → binary data "" displayed as garbled
         // Just verify it doesn't crash and produces different output
         assert_ne!(without, result);
+    }
+
+    #[test]
+    fn test_decode_numeric_pg() {
+        // numeric(6,5) value 0.02: ndigits=1, weight=-1, sign=pos, dscale=5, digit=200
+        let mut buf = vec![];
+        buf.extend_from_slice(&1i16.to_be_bytes());  // ndigits
+        buf.extend_from_slice(&(-1i16).to_be_bytes()); // weight = -1
+        buf.extend_from_slice(&0i16.to_be_bytes());  // sign = positive
+        buf.extend_from_slice(&5i16.to_be_bytes());  // dscale = 5
+        buf.extend_from_slice(&200i16.to_be_bytes()); // digit = 200
+
+        assert_eq!(try_decode_numeric(&buf).unwrap(), "0.02000");
+
+        // 123.45: ndigits=3, weight=1, sign=pos, dscale=2
+        // digit[0]=0, digit[1]=123, digit[2]=4500
+        let mut buf2 = vec![];
+        buf2.extend_from_slice(&3i16.to_be_bytes());
+        buf2.extend_from_slice(&1i16.to_be_bytes());  // weight=1
+        buf2.extend_from_slice(&0i16.to_be_bytes());
+        buf2.extend_from_slice(&2i16.to_be_bytes());  // dscale=2
+        buf2.extend_from_slice(&0i16.to_be_bytes());  // digit[0]=0
+        buf2.extend_from_slice(&123i16.to_be_bytes()); // digit[1]=123
+        buf2.extend_from_slice(&4500i16.to_be_bytes()); // digit[2]=4500
+        assert_eq!(try_decode_numeric(&buf2).unwrap(), "123.45");
+
+        // -42.5: ndigits=2, weight=0, sign=neg, dscale=1
+        // digit[0]=42, digit[1]=5000
+        let mut buf3 = vec![];
+        buf3.extend_from_slice(&2i16.to_be_bytes());
+        buf3.extend_from_slice(&0i16.to_be_bytes());  // weight=0
+        buf3.extend_from_slice(&0x4000i16.to_be_bytes()); // sign=negative
+        buf3.extend_from_slice(&1i16.to_be_bytes());  // dscale=1
+        buf3.extend_from_slice(&42i16.to_be_bytes());  // digit[0]=42
+        buf3.extend_from_slice(&5000i16.to_be_bytes()); // digit[1]=5000
+        assert_eq!(try_decode_numeric(&buf3).unwrap(), "-42.5");
+
+        // NaN
+        let mut buf4 = vec![];
+        buf4.extend_from_slice(&1i16.to_be_bytes());
+        buf4.extend_from_slice(&0i16.to_be_bytes());
+        buf4.extend_from_slice(&(-16384i16).to_be_bytes()); // sign = NaN (0xC000 as i16)
+        buf4.extend_from_slice(&0i16.to_be_bytes());  // dscale=0
+        buf4.extend_from_slice(&0i16.to_be_bytes());  // digit=0
+        assert_eq!(try_decode_numeric(&buf4).unwrap(), "NaN");
+
+        // Invalid sign → None
+        let mut buf5 = vec![];
+        buf5.extend_from_slice(&1i16.to_be_bytes());
+        buf5.extend_from_slice(&0i16.to_be_bytes());
+        buf5.extend_from_slice(&(-1i16).to_be_bytes()); // invalid sign (0xFFFF)
+        buf5.extend_from_slice(&0i16.to_be_bytes());
+        buf5.extend_from_slice(&0i16.to_be_bytes());
+        assert!(try_decode_numeric(&buf5).is_none());
     }
 }
