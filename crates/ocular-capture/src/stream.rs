@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::IpAddr;
 
 use crate::PendingRequest;
@@ -33,6 +34,8 @@ pub struct TcpStreamState {
     pub pending_request: Option<PendingRequest>,
     /// MySQL: tracks whether the handshake phase is complete.
     pub handshake_done: bool,
+    /// Postgres: stmt_name → SQL for Bind parameter substitution
+    pub stmt_map: HashMap<String, String>,
 }
 
 impl TcpStreamState {
@@ -42,6 +45,7 @@ impl TcpStreamState {
             response_buf: Vec::with_capacity(4096),
             pending_request: None,
             handshake_done: false,
+            stmt_map: HashMap::new(),
         }
     }
 

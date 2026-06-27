@@ -2,8 +2,8 @@ mod stream;
 
 use anyhow::{Context, Result};
 use ocular_protocol::{
-    extract_full_command, format_response_detail, get_handler, parse_request, parse_response,
-    Protocol, ProxyEvent,
+    extract_full_command, format_response_detail, get_handler, parse_bind_params, parse_request,
+    parse_response, Protocol, ProxyEvent,
 };
 use std::collections::HashMap;
 use std::time::{Instant, SystemTime};
@@ -235,33 +235,112 @@ fn process_packet(
             if handler.needs_request_buffering() && !handler.request_complete(&stream.request_buf) {
                 return;
             }
-            let buf = &stream.request_buf;
-            if let Some(command) = parse_request(protocol, buf) {
-                tracing::debug!(component = %name, "parsed request: {}", command);
-                let full_command =
-                    extract_full_command(protocol, buf).unwrap_or_else(|| command.clone());
-                stream.pending_request = Some(PendingRequest {
-                    timestamp: SystemTime::now(),
-                    instant: Instant::now(),
-                    command,
-                    full_command,
-                });
+
+            // Postgres: scan all messages (Parse, Bind) for param substitution
+            if protocol == Protocol::Postgres {
+                let buf = &stream.request_buf;
+                let mut pos = 0;
+                while pos < buf.len() {
+                    let first = buf[pos];
+                    let is_typed = matches!(first, b'Q' | b'P' | b'B' | b'E' | b'D' | b'S' | b'X' | b'C' | b'p' | b'H' | b'F' | b'd' | b'c' | b'f');
+                    if !is_typed { break; }
+                    if pos + 5 > buf.len() { break; }
+                    let len = u32::from_be_bytes([buf[pos+1], buf[pos+2], buf[pos+3], buf[pos+4]]) as usize;
+                    let end = pos + 1 + len;
+                    if end > buf.len() { break; }
+                    let msg = &buf[pos..end];
+                    let msg_payload = &buf[pos+5..end];
+
+                    match first {
+                        b'Q' => {
+                            if let Some(command) = parse_request(protocol, msg) {
+                                let full_command = extract_full_command(protocol, msg)
+                                    .unwrap_or_else(|| command.clone());
+                                stream.pending_request = Some(PendingRequest {
+                                    timestamp: SystemTime::now(),
+                                    instant: Instant::now(),
+                                    command,
+                                    full_command,
+                                });
+                            }
+                        }
+                        b'P' => {
+                            if let Some(command) = parse_request(protocol, msg) {
+                                let full_command = extract_full_command(protocol, msg)
+                                    .unwrap_or_else(|| command.clone());
+                                stream.pending_request = Some(PendingRequest {
+                                    timestamp: SystemTime::now(),
+                                    instant: Instant::now(),
+                                    command,
+                                    full_command,
+                                });
+                            }
+                            // Store stmt_name → SQL for later Bind correlation
+                            if !msg_payload.is_empty() {
+                                let stmt = ocular_protocol::postgres::read_cstr(msg_payload);
+                                let rest = &msg_payload[stmt.len() + 1..];
+                                let query = ocular_protocol::postgres::read_cstr(rest);
+                                if !query.is_empty() {
+                                    stream.stmt_map.insert(stmt, query);
+                                }
+                            }
+                        }
+                        b'B' => {
+                            if let Some(info) = parse_bind_params(msg_payload) {
+                                if let Some(sql) = stream.stmt_map.get(&info.stmt).cloned() {
+                                    let mut filled = sql.clone();
+                                    for (i, param) in info.params.iter().enumerate() {
+                                        filled = filled.replace(&format!("${}", i + 1), param);
+                                    }
+                                    let params_str = info.params.join(", ");
+                                    if let Some(pending) = stream.pending_request.as_mut() {
+                                        pending.command = format!("{}  [{}]", pending.command, params_str);
+                                        pending.full_command = filled;
+                                    } else {
+                                        stream.pending_request = Some(PendingRequest {
+                                            timestamp: SystemTime::now(),
+                                            instant: Instant::now(),
+                                            command: filled.clone(),
+                                            full_command: filled,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    pos = end;
+                }
                 stream.request_buf.clear();
             } else {
-                tracing::debug!(
-                    component = %name,
-                    "parse_request returned None, buf={}B first_bytes={:02x?}",
-                    stream.request_buf.len(),
-                    &stream.request_buf[..stream.request_buf.len().min(16)]
-                );
-                // Discard complete but unparseable messages via trait
-                if let Some(msg_len) = handler.message_length(&stream.request_buf) {
-                    if stream.request_buf.len() >= msg_len {
-                        stream.request_buf.drain(..msg_len);
+                let buf = &stream.request_buf;
+                if let Some(command) = parse_request(protocol, buf) {
+                    tracing::debug!(component = %name, "parsed request: {}", command);
+                    let full_command =
+                        extract_full_command(protocol, buf).unwrap_or_else(|| command.clone());
+                    stream.pending_request = Some(PendingRequest {
+                        timestamp: SystemTime::now(),
+                        instant: Instant::now(),
+                        command,
+                        full_command,
+                    });
+                    stream.request_buf.clear();
+                } else {
+                    tracing::debug!(
+                        component = %name,
+                        "parse_request returned None, buf={}B first_bytes={:02x?}",
+                        stream.request_buf.len(),
+                        &stream.request_buf[..stream.request_buf.len().min(16)]
+                    );
+                    // Discard complete but unparseable messages via trait
+                    if let Some(msg_len) = handler.message_length(&stream.request_buf) {
+                        if stream.request_buf.len() >= msg_len {
+                            stream.request_buf.drain(..msg_len);
+                        }
                     }
                 }
+                // If parse_request returns None, keep buffering
             }
-            // If parse_request returns None, keep buffering
         }
         Direction::Response => {
             stream.push_response(payload);

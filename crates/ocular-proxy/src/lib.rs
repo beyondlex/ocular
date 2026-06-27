@@ -1,5 +1,6 @@
 use anyhow::Result;
-use ocular_protocol::{Protocol, parse_request, parse_response, extract_full_command, format_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len, ProtocolHandler};
+use ocular_protocol::{Protocol, parse_request, parse_response, extract_full_command, format_response_detail, format_postgres_response_detail_with_formats, parse_amqp_frame, parse_amqp_request_full, is_async_method, amqp_frame_len, ProtocolHandler, parse_bind_params};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,6 +18,9 @@ struct PendingRequest {
     instant: Instant,
     command: String,
     full_command: String,
+    /// Bind result-column format codes: true = binary, false = text.
+    /// None means use RowDescription format codes directly (simple query protocol).
+    result_formats: Option<Vec<bool>>,
 }
 
 pub async fn run_proxy(
@@ -139,9 +143,9 @@ impl ReqBufMgr {
                     instant: Instant::now(),
                     command,
                     full_command,
+                    result_formats: None,
                 });
             }
-            // Advance past consumed bytes
             let consumed = self.consumed_len(protocol, handler);
             if consumed > 0 && consumed <= self.buf.len() {
                 self.buf.drain(..consumed);
@@ -221,9 +225,15 @@ impl RespBufMgr {
                 } else {
                     &self.buf
                 };
+                eprintln!("[ocular-proxy] resp_mgr: took pending, result_formats={:?}", req.result_formats);
                 let response = parse_response(protocol, parse_buf).unwrap_or_default();
-                let response_detail = format_response_detail(protocol, parse_buf)
-                    .unwrap_or_else(|| response.clone());
+                let response_detail = if protocol == Protocol::Postgres {
+                    format_postgres_response_detail_with_formats(parse_buf, req.result_formats.as_deref())
+                        .unwrap_or_else(|| response.clone())
+                } else {
+                    format_response_detail(protocol, parse_buf)
+                        .unwrap_or_else(|| response.clone())
+                };
                 let _ = tx.send(ProxyEvent {
                     timestamp: req.timestamp,
                     component: name.to_string(),
@@ -381,6 +391,7 @@ async fn handle_conn(
 
     let (mut cr, mut cw) = client.split();
     let pending: Arc<Mutex<Option<PendingRequest>>> = Arc::new(Mutex::new(None));
+    let stmt_map: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
     let handler = ocular_protocol::get_handler(protocol);
 
     let name_req = name.to_string();
@@ -394,6 +405,7 @@ async fn handle_conn(
     let dest_req = dest.clone();
     let src_resp = src.clone();
     let dest_resp = dest;
+    let stmt_map_req = stmt_map.clone();
 
     // ─── Client → Server ────────────────────────────────────────────────
 
@@ -441,6 +453,7 @@ async fn handle_conn(
                                     instant: Instant::now(),
                                     command: method.summary.clone(),
                                     full_command: method.detail.clone(),
+                                    result_formats: None,
                                 });
                             }
                         }
@@ -448,7 +461,7 @@ async fn handle_conn(
                     pos += flen;
                 }
             } else if protocol == Protocol::Postgres {
-                // Postgres: scan typed messages, only Q/P set pending
+                // Postgres: scan typed messages; Q/P set pending, Bind updates params
                 let mut pos = 0;
                 while pos < data.len() {
                     let first = data[pos];
@@ -458,18 +471,69 @@ async fn handle_conn(
                     let len = u32::from_be_bytes([data[pos+1], data[pos+2], data[pos+3], data[pos+4]]) as usize;
                     let end = pos + 1 + len;
                     if end > data.len() { break; }
-                    if first == b'Q' || first == b'P' {
-                        let msg = &data[pos..end];
-                        if let Some(command) = parse_request(protocol, msg) {
-                            let full_command = extract_full_command(protocol, msg)
-                                .unwrap_or_else(|| command.clone());
-                            *pending_w.lock().unwrap() = Some(PendingRequest {
-                                timestamp: SystemTime::now(),
-                                instant: Instant::now(),
-                                command,
-                                full_command,
-                            });
+                    let payload = &data[pos+5..end];
+
+                    match first {
+                        b'Q' | b'P' => {
+                            let msg = &data[pos..end];
+                            if let Some(command) = parse_request(protocol, msg) {
+                                let full_command = extract_full_command(protocol, msg)
+                                    .unwrap_or_else(|| command.clone());
+                                *pending_w.lock().unwrap() = Some(PendingRequest {
+                                    timestamp: SystemTime::now(),
+                                    instant: Instant::now(),
+                                    command,
+                                    full_command,
+                                    result_formats: None,
+                                });
+                            }
+                            // Store stmt_name → SQL for later Bind correlation
+                            if first == b'P' && !payload.is_empty() {
+                                let stmt = ocular_protocol::postgres::read_cstr(payload);
+                                let rest = &payload[stmt.len() + 1..];
+                                let query = ocular_protocol::postgres::read_cstr(rest);
+                                if !query.is_empty() {
+                                    stmt_map_req.lock().unwrap().insert(stmt, query);
+                                }
+                            }
                         }
+                        b'B' => {
+                            eprintln!("[ocular-proxy] Bind: pending before parse={:?}", pending_w.lock().unwrap().as_ref().map(|p| (&p.command, p.result_formats.is_some())));
+                            if let Some(info) = parse_bind_params(payload) {
+                                eprintln!("[ocular-proxy] Bind: parse_bind_params returned result_formats={:?}", info.result_formats);
+                                debug!(component = %name_req, stmt = %info.stmt, params = ?info.params, "Bind received");
+                                if let Some(sql) = stmt_map_req.lock().unwrap().get(&info.stmt).cloned() {
+                                    let mut filled = sql.clone();
+                                    for (i, param) in info.params.iter().enumerate() {
+                                        filled = filled.replace(&format!("${}", i + 1), param);
+                                    }
+                                    let params_str = info.params.join(", ");
+                                    let mut pw = pending_w.lock().unwrap();
+                                    if let Some(pending) = pw.as_mut() {
+                                        // Update existing pending (no Sync after Describe)
+                                        pending.command = format!("{}  [{}]", pending.command, params_str);
+                                        pending.full_command = filled;
+                                        pending.result_formats = Some(info.result_formats);
+                                        debug!(component = %name_req, command = %pending.command, "Bind updated existing pending");
+                                    } else {
+                                        // Set new pending (Sync already consumed previous one)
+                                        *pw = Some(PendingRequest {
+                                            timestamp: SystemTime::now(),
+                                            instant: Instant::now(),
+                                            command: filled.clone(),
+                                            full_command: filled,
+                                            result_formats: Some(info.result_formats),
+                                        });
+                                        debug!(component = %name_req, "Bind created new pending with filled SQL");
+                                    }
+                                } else {
+                                    debug!(component = %name_req, stmt = %info.stmt, "Bind: stmt not found in map");
+                                }
+                            } else {
+                                debug!(component = %name_req, "Bind: parse_bind_params returned None");
+                            }
+                        }
+                        _ => {}
                     }
                     pos = end;
                 }
@@ -488,6 +552,7 @@ async fn handle_conn(
                         instant: Instant::now(),
                         command,
                         full_command,
+                        result_formats: None,
                     });
                 }
             }

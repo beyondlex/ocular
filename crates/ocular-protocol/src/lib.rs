@@ -12,6 +12,7 @@ pub mod handlers;
 pub use resp::{RespValue, parse_resp};
 pub use mysql::{parse_mysql_request, parse_mysql_response};
 pub use amqp::{parse_amqp_request, parse_amqp_response, format_amqp_response_detail, parse_amqp_frame, parse_amqp_request_full, is_async_method, frame_len as amqp_frame_len};
+pub use postgres::{parse_bind_params, BindInfo, format_postgres_response_detail_with_formats};
 pub use handler::ProtocolHandler;
 pub use handler::HandshakeAction;
 pub use handlers::*;

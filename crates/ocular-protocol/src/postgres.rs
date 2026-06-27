@@ -61,7 +61,19 @@ pub fn parse_postgres_request(buf: &[u8]) -> Option<String> {
                 Some(format!("PREPARE [{}] {}", stmt, q))
             }
         }
-        b'B' => Some("BIND".into()),
+        b'B' => {
+            // Bind
+            if let Some(info) = parse_bind_params(payload) {
+                let p = info.params.join(", ");
+                if info.stmt.is_empty() {
+                    Some(format!("BIND params: [{}]", p))
+                } else {
+                    Some(format!("BIND [{}] params: [{}]", info.stmt, p))
+                }
+            } else {
+                Some("BIND".into())
+            }
+        }
         b'E' => {
             // Execute
             let portal = read_cstr(payload);
@@ -236,6 +248,17 @@ fn parse_single_response(msg_type: u8, payload: &[u8]) -> Option<String> {
 
 /// Format response detail for the detail panel
 pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
+    format_postgres_response_detail_with_formats(buf, None)
+}
+
+/// Same as `format_postgres_response_detail`, but accepts Bind result format codes
+/// which override the RowDescription format codes (needed because Describe(Statement)
+/// always returns format_code=0, while actual DataRow data may be binary).
+///
+/// `bind_formats`: per-column true=binary/false=text. If shorter than column count,
+/// remaining columns default to false (text). If Some(empty), all columns are text.
+pub fn format_postgres_response_detail_with_formats(buf: &[u8], bind_formats: Option<&[bool]>) -> Option<String> {
+    eprintln!("[ocular] format_detail: bind_formats={:?}", bind_formats.map(|b| b.to_vec()));
     if buf.is_empty() { return None; }
     // SSL response
     if buf.len() == 1 {
@@ -245,6 +268,9 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
     let mut detail = String::new();
     let mut pos = 0;
     let mut row_count = 0u64;
+    // Track format codes per column (from RowDescription)
+    // true = binary, false = text
+    let mut col_formats: Vec<bool> = Vec::new();
 
     while pos < buf.len() {
         if pos + 5 > buf.len() { break; }
@@ -255,14 +281,51 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
 
         match msg_type {
             b'T' if payload.len() >= 2 => {
-                // RowDescription - extract column names
+                eprintln!("[ocular] MATCH T: len={} has_bind={}", payload.len(), bind_formats.is_some());
+                // RowDescription - extract column names and format codes
                 let col_count = u16::from_be_bytes([payload[0], payload[1]]) as usize;
                     let mut p = 2;
                     let mut cols = Vec::new();
+                    col_formats.clear();
                     for _ in 0..col_count {
                         let name = read_cstr(&payload[p..]);
-                        p += name.len() + 1 + 18; // name + null + 18 bytes of field info
+                        p += name.len() + 1;
+                        // field metadata: table_oid(4) + col_attr(2) + type_oid(4) + type_size(2) + type_mod(4) + format_code(2)
+                        if p + 18 <= payload.len() {
+                            let format_code = u16::from_be_bytes([payload[p+16], payload[p+17]]);
+                            col_formats.push(format_code == 1);
+                            p += 18;
+                        } else {
+                            col_formats.push(false);
+                            p = payload.len();
+                        }
                         cols.push(name);
+                    }
+                    // If Bind result format codes are available, use them INSTEAD of
+                    // the RowDescription format codes (Describe(Statement) always returns
+                    // format_code=0 even when actual data is binary).
+                    //
+                    // Per PG wire protocol:
+                    //   bind_formats.len() == 0 → num_rf=0, all text (no override)
+                    //   bind_formats.len() == 1 → single format for ALL columns
+                    //   bind_formats.len() >= 2 → per-column format; remaining default text
+                    if let Some(bind_fmts) = bind_formats {
+                        eprintln!("[ocular] override_formats: rd={:?} bind={:?}",
+                            col_formats, bind_fmts);
+                        if bind_fmts.len() == 1 {
+                            let all = bind_fmts[0];
+                            for fmt in col_formats.iter_mut() {
+                                *fmt = all;
+                            }
+                        } else {
+                            for (i, fmt) in col_formats.iter_mut().enumerate() {
+                                if let Some(&bf) = bind_fmts.get(i) {
+                                    *fmt = bf;
+                                } else {
+                                    *fmt = false; // remaining columns default to text
+                                }
+                            }
+                        }
                     }
                     detail.push_str(&format!("Columns: {}\n", cols.join(" | ")));
             }
@@ -274,7 +337,7 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
                         let ncols = u16::from_be_bytes([payload[0], payload[1]]) as usize;
                         let mut p = 2;
                         let mut fields = Vec::new();
-                        for _ in 0..ncols {
+                        for i in 0..ncols {
                             if p + 4 > payload.len() { break; }
                             let flen = i32::from_be_bytes([payload[p], payload[p+1], payload[p+2], payload[p+3]]);
                             p += 4;
@@ -283,7 +346,24 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
                             } else {
                                 let end = p + flen as usize;
                                 if end <= payload.len() {
-                                    fields.push(String::from_utf8_lossy(&payload[p..end]).to_string());
+                                    // Use Bind result format codes as authoritative (they don't
+                                    // depend on RowDescription being in the same response buffer).
+                                    // Fall back to RowDescription format codes for simple queries.
+                                    let is_binary = if let Some(bind_fmts) = bind_formats {
+                                        if bind_fmts.len() == 1 {
+                                            bind_fmts[0]  // single format for ALL columns
+                                        } else {
+                                            bind_fmts.get(i).copied().unwrap_or(false)
+                                        }
+                                    } else {
+                                        col_formats.get(i).copied().unwrap_or(false)
+                                    };
+                                    if is_binary {
+                                        fields.push(decode_binary_field(&payload[p..end]));
+                                    } else {
+                                        fields.push(String::from_utf8_lossy(&payload[p..end]).to_string());
+                                    }
+                                    eprintln!("[ocular] col[{}] binary={} len={} raw={:02x?} text={}", i, is_binary, flen, &payload[p..end], fields.last().unwrap());
                                 }
                                 p = end;
                             }
@@ -312,6 +392,42 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
     }
 }
 
+/// Decode a binary-encoded DataRow field value to a human-readable string.
+/// Tries common integer/float sizes, falls back to hex if unrecognised.
+fn decode_binary_field(buf: &[u8]) -> String {
+    match buf.len() {
+        1 => format!("{}", buf[0]),
+        2 => {
+            let v = i16::from_be_bytes([buf[0], buf[1]]);
+            format!("{}", v)
+        }
+        4 => {
+            let v = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            format!("{}", v)
+        }
+        8 => {
+            // Could be int8 or float8 — show both to avoid misclassification
+            let i = i64::from_be_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]]);
+            let f = f64::from_be_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]]);
+            if f.is_finite() && f.to_string().len() < 20 {
+                format!("{}", f)
+            } else {
+                format!("{}", i)
+            }
+        }
+        _ => {
+            if let Ok(s) = std::str::from_utf8(buf) {
+                if s.chars().all(|c| !c.is_control() || c == '\t' || c == '\n') {
+                    return format!("'{}'", s);
+                }
+            }
+            // PostgreSQL binary array/text/json/etc. — hex dump
+            let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+            format!("<hex: {}>", hex)
+        }
+    }
+}
+
 /// Check if a PostgreSQL response is complete (ends with ReadyForQuery 'Z')
 pub fn postgres_response_complete(buf: &[u8]) -> bool {
     if buf.is_empty() { return false; }
@@ -335,7 +451,137 @@ pub fn postgres_response_complete(buf: &[u8]) -> bool {
     last_type == b'Z' && pos == buf.len()
 }
 
-fn read_cstr(buf: &[u8]) -> String {
+/// Parsed Bind message info
+#[derive(Debug, Clone)]
+pub struct BindInfo {
+    pub portal: String,
+    pub stmt: String,
+    pub params: Vec<String>,
+    /// Per-column result format code: true = binary, false = text.
+    /// Empty means all columns are text (num_rf = 0 in Bind).
+    pub result_formats: Vec<bool>,
+}
+
+/// Parse Bind (`B`) message payload, extracting parameter values.
+/// Bind format: portal(cstring) | stmt(cstring) | num_pf(i16) | pf_codes(i16×N) |
+///              num_params(i16) | param_len(i32)+value(bytes) for each | num_rf(i16) | rf_codes(i16×N)
+pub fn parse_bind_params(payload: &[u8]) -> Option<BindInfo> {
+    let mut pos = 0;
+
+    let portal = read_cstr(payload);
+    pos += portal.len() + 1;
+    if pos > payload.len() { return None; }
+
+    let rest = &payload[pos..];
+    let stmt = read_cstr(rest);
+    pos += stmt.len() + 1;
+    if pos + 2 > payload.len() { return None; }
+
+    let num_pf = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+    pos += 2;
+    let fmt_codes: Vec<i16> = if num_pf > 0 {
+        let count = num_pf as usize;
+        if pos + count * 2 > payload.len() { return None; }
+        let codes: Vec<i16> = (0..count).map(|i| {
+            i16::from_be_bytes([payload[pos + i * 2], payload[pos + i * 2 + 1]])
+        }).collect();
+        pos += count * 2;
+        codes
+    } else {
+        vec![]
+    };
+
+    if pos + 2 > payload.len() { return None; }
+    let num_params = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+    pos += 2;
+
+    let mut params = Vec::with_capacity(num_params as usize);
+    for i in 0..num_params as usize {
+        if pos + 4 > payload.len() { return None; }
+        let param_len = i32::from_be_bytes([payload[pos], payload[pos + 1], payload[pos + 2], payload[pos + 3]]);
+        pos += 4;
+
+        if param_len == -1 {
+            params.push("NULL".to_string());
+        } else if param_len < 0 {
+            params.push("<invalid>".to_string());
+        } else {
+            let end = pos + param_len as usize;
+            if end > payload.len() { return None; }
+
+            let is_binary = if fmt_codes.is_empty() {
+                false
+            } else if fmt_codes.len() == 1 {
+                fmt_codes[0] == 1
+            } else if i < fmt_codes.len() {
+                fmt_codes[i] == 1
+            } else {
+                false
+            };
+
+            if is_binary {
+                params.push(decode_binary_param(&payload[pos..end]));
+            } else {
+                let val = String::from_utf8_lossy(&payload[pos..end]).to_string();
+                params.push(val);
+            }
+            pos = end;
+        }
+    }
+
+    // Parse result-column format codes (num_rf + rf_codes)
+    let result_formats: Vec<bool> = if pos + 2 <= payload.len() {
+        let num_rf = i16::from_be_bytes([payload[pos], payload[pos + 1]]);
+        pos += 2;
+        if num_rf > 0 {
+            let count = num_rf as usize;
+            if pos + count * 2 <= payload.len() {
+                let codes: Vec<bool> = (0..count).map(|i| {
+                    payload[pos + i * 2 + 1] == 1
+                }).collect();
+                codes
+            } else {
+                vec![]
+            }
+        } else {
+            vec![] // num_rf = 0 means all columns are text
+        }
+    } else {
+        vec![]
+    };
+
+    Some(BindInfo { portal, stmt, params, result_formats })
+}
+
+/// Decode a binary parameter value to a human-readable string.
+/// Tries integer decoding for standard PG type sizes, falls back to UTF-8 or hex.
+fn decode_binary_param(buf: &[u8]) -> String {
+    match buf.len() {
+        1 => format!("{}", buf[0]),
+        2 => {
+            let v = i16::from_be_bytes([buf[0], buf[1]]);
+            format!("{}", v)
+        }
+        4 => {
+            let v = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+            format!("{}", v)
+        }
+        8 => {
+            let v = i64::from_be_bytes([buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7]]);
+            format!("{}", v)
+        }
+        _ => {
+            if let Ok(s) = std::str::from_utf8(buf) {
+                if s.chars().all(|c| !c.is_control() || c == '\t' || c == '\n') {
+                    return format!("'{}'", s);
+                }
+            }
+            format!("<hex: {}>", buf.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().concat())
+        }
+    }
+}
+
+pub fn read_cstr(buf: &[u8]) -> String {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..end]).to_string()
 }
@@ -591,5 +837,296 @@ mod tests {
         buf.extend_from_slice(sql_bytes);
         let result = extract_postgres_full_command(&buf).unwrap();
         assert_eq!(result, "SELECT * FROM very_long_table_name WHERE id = 12345");
+    }
+
+    #[test]
+    fn test_parse_bind_params_text() {
+        let mut payload = vec![];
+        payload.extend_from_slice(b"\0"); // portal (unnamed)
+        payload.extend_from_slice(b"s1\0"); // stmt
+        payload.extend_from_slice(&0i16.to_be_bytes()); // num_pf = 0
+        payload.extend_from_slice(&2i16.to_be_bytes()); // num_params = 2
+        payload.extend_from_slice(&5i32.to_be_bytes()); // len=5
+        payload.extend_from_slice(b"hello");
+        payload.extend_from_slice(&2i32.to_be_bytes()); // len=2
+        payload.extend_from_slice(b"42");
+        payload.extend_from_slice(&0i16.to_be_bytes()); // num_rf = 0
+
+        let info = parse_bind_params(&payload).unwrap();
+        assert_eq!(info.portal, "");
+        assert_eq!(info.stmt, "s1");
+        assert_eq!(info.params, vec!["hello", "42"]);
+        assert_eq!(info.result_formats, Vec::<bool>::new()); // num_rf=0 → empty
+    }
+
+    #[test]
+    fn test_parse_bind_params_binary_result_formats() {
+        // Bind with binary result-column format codes (all columns binary)
+        let mut payload = vec![];
+        payload.extend_from_slice(b"\0"); // portal
+        payload.extend_from_slice(b"\0"); // stmt (unnamed)
+        payload.extend_from_slice(&0i16.to_be_bytes()); // num_pf = 0
+        payload.extend_from_slice(&1i16.to_be_bytes()); // num_params = 1
+        payload.extend_from_slice(&3i32.to_be_bytes()); // len=3
+        payload.extend_from_slice(b"foo");
+        payload.extend_from_slice(&2i16.to_be_bytes()); // num_rf = 2 (2 result columns)
+        payload.extend_from_slice(&1i16.to_be_bytes()); // rf_code[0] = 1 (binary)
+        payload.extend_from_slice(&0i16.to_be_bytes()); // rf_code[1] = 0 (text)
+
+        let info = parse_bind_params(&payload).unwrap();
+        assert_eq!(info.params, vec!["foo"]);
+        assert_eq!(info.result_formats, vec![true, false]);
+    }
+
+    #[test]
+    fn test_parse_bind_params_binary() {
+        let mut payload = vec![];
+        payload.extend_from_slice(b"\0"); // portal
+        payload.extend_from_slice(b"\0"); // stmt (unnamed)
+        payload.extend_from_slice(&1i16.to_be_bytes()); // num_pf = 1 (all binary)
+        payload.extend_from_slice(&1i16.to_be_bytes()); // fmt_code = 1 (binary)
+        payload.extend_from_slice(&2i16.to_be_bytes()); // num_params = 2
+        // int4 = 42
+        payload.extend_from_slice(&4i32.to_be_bytes());
+        payload.extend_from_slice(&42i32.to_be_bytes());
+        // int2 = 7
+        payload.extend_from_slice(&2i32.to_be_bytes());
+        payload.extend_from_slice(&7i16.to_be_bytes());
+        payload.extend_from_slice(&0i16.to_be_bytes()); // num_rf = 0
+
+        let info = parse_bind_params(&payload).unwrap();
+        assert_eq!(info.params, vec!["42", "7"]);
+    }
+
+    #[test]
+    fn test_parse_bind_params_null() {
+        let mut payload = vec![];
+        payload.extend_from_slice(b"\0");
+        payload.extend_from_slice(b"\0");
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&1i16.to_be_bytes()); // num_params = 1
+        payload.extend_from_slice(&(-1i32).to_be_bytes()); // NULL
+        payload.extend_from_slice(&0i16.to_be_bytes());
+
+        let info = parse_bind_params(&payload).unwrap();
+        assert_eq!(info.params[0], "NULL");
+    }
+
+    #[test]
+    fn test_parse_bind_params_truncated() {
+        assert!(parse_bind_params(&[0]).is_none());
+    }
+
+    #[test]
+    fn test_bind_in_parse_request() {
+        let mut payload = vec![];
+        payload.extend_from_slice(b"\0");
+        payload.extend_from_slice(b"\0");
+        payload.extend_from_slice(&0i16.to_be_bytes());
+        payload.extend_from_slice(&1i16.to_be_bytes());
+        payload.extend_from_slice(&3i32.to_be_bytes());
+        payload.extend_from_slice(b"foo");
+        payload.extend_from_slice(&0i16.to_be_bytes());
+
+        let len = payload.len() as u32 + 4;
+        let mut buf = vec![b'B'];
+        buf.extend_from_slice(&len.to_be_bytes());
+        buf.extend_from_slice(&payload);
+
+        let result = parse_postgres_request(&buf).unwrap();
+        assert_eq!(result, "BIND params: [foo]");
+    }
+
+    #[test]
+    fn test_format_detail_with_bind_binary_formats() {
+        // Simulate a response to Parse + Describe(Statement) + Bind(binary) + Execute
+        // where RowDescription has format_code=0 (from Describe) but Bind says binary.
+        // The bind_formats override should make format_postgres_response_detail_with_formats
+        // decode column 0 as binary (int4=42) and column 1 as text ("hello").
+
+        fn make_msg(typ: u8, payload: &[u8]) -> Vec<u8> {
+            let mut msg = vec![typ];
+            msg.extend_from_slice(&((payload.len() as u32 + 4).to_be_bytes()));
+            msg.extend_from_slice(payload);
+            msg
+        }
+
+        // 1. ParseComplete
+        let mut buf = make_msg(b'1', &[]);
+
+        // 2. BindComplete
+        buf.extend_from_slice(&make_msg(b'2', &[]));
+
+        // 3. RowDescription: 2 columns "id" and "name", both format_code=0 (from Describe)
+        let mut rd_payload = vec![];
+        rd_payload.extend_from_slice(&2i16.to_be_bytes()); // 2 columns
+        // col 0: "id"
+        rd_payload.extend_from_slice(b"id\0");
+        rd_payload.extend_from_slice(&[0u8; 4]); // table_oid
+        rd_payload.extend_from_slice(&[0u8; 2]); // col_attr
+        rd_payload.extend_from_slice(&[0u8; 4]); // type_oid (int4 = 23)
+        rd_payload.extend_from_slice(&[0u8; 2]); // type_size
+        rd_payload.extend_from_slice(&[0u8; 4]); // type_mod
+        rd_payload.extend_from_slice(&0i16.to_be_bytes()); // format_code = 0 (text!)
+        // col 1: "name"
+        rd_payload.extend_from_slice(b"name\0");
+        rd_payload.extend_from_slice(&[0u8; 4]);
+        rd_payload.extend_from_slice(&[0u8; 2]);
+        rd_payload.extend_from_slice(&[0u8; 4]);
+        rd_payload.extend_from_slice(&[0u8; 2]);
+        rd_payload.extend_from_slice(&[0u8; 4]);
+        rd_payload.extend_from_slice(&0i16.to_be_bytes()); // format_code = 0 (text!)
+        buf.extend_from_slice(&make_msg(b'T', &rd_payload));
+
+        // 4. DataRow: col0=binary int4=42, col1=text "hello"
+        let mut dr_payload = vec![];
+        dr_payload.extend_from_slice(&2i16.to_be_bytes()); // 2 columns
+        // col0: 4-byte binary int32
+        dr_payload.extend_from_slice(&4i32.to_be_bytes()); // length
+        dr_payload.extend_from_slice(&42i32.to_be_bytes()); // value
+        // col1: 5-byte text
+        dr_payload.extend_from_slice(&5i32.to_be_bytes()); // length
+        dr_payload.extend_from_slice(b"hello");
+        buf.extend_from_slice(&make_msg(b'D', &dr_payload));
+
+        // 5. CommandComplete
+        let cc_tag = b"SELECT 1\0";
+        buf.extend_from_slice(&make_msg(b'C', cc_tag));
+
+        // 6. ReadyForQuery
+        buf.extend_from_slice(&make_msg(b'Z', &[b'I']));
+
+        // WITHOUT bind_formats → column 0 decoded as text (garbled binary)
+        let without = format_postgres_response_detail(&buf).unwrap();
+        assert!(without.contains("Columns:"));
+
+        // WITH bind_formats (col0=binary, col1=text) → column 0 decoded as "42"
+        let bind_fmts = vec![true, false];
+        let with = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts)).unwrap();
+        assert!(with.contains("Columns: id | name"));
+        assert!(with.contains("42 | hello"), "expected '42 | hello' but got: {with:?}");
+        assert!(with.contains("1 rows"));
+    }
+
+    #[test]
+    fn test_format_detail_with_single_bind_format_all_binary() {
+        // num_rf = 1 with format=1 means ALL columns are binary.
+        // RowDescription says text (0) but Bind overrides to binary.
+        fn make_msg(typ: u8, payload: &[u8]) -> Vec<u8> {
+            let mut msg = vec![typ];
+            msg.extend_from_slice(&((payload.len() as u32 + 4).to_be_bytes()));
+            msg.extend_from_slice(payload);
+            msg
+        }
+
+        let mut buf = make_msg(b'1', &[]); // ParseComplete
+        buf.extend_from_slice(&make_msg(b'2', &[])); // BindComplete
+
+        // RowDescription: 2 cols, both format_code=0
+        let mut rd = vec![];
+        rd.extend_from_slice(&2i16.to_be_bytes());
+        rd.extend_from_slice(b"a\0");
+        rd.extend_from_slice(&[0u8; 16]); // metadata
+        rd.extend_from_slice(&0i16.to_be_bytes()); // format=0
+        rd.extend_from_slice(b"b\0");
+        rd.extend_from_slice(&[0u8; 16]);
+        rd.extend_from_slice(&0i16.to_be_bytes()); // format=0
+        buf.extend_from_slice(&make_msg(b'T', &rd));
+
+        // DataRow: both columns binary int4
+        let mut dr = vec![];
+        dr.extend_from_slice(&2i16.to_be_bytes());
+        dr.extend_from_slice(&4i32.to_be_bytes());
+        dr.extend_from_slice(&100i32.to_be_bytes()); // a=100
+        dr.extend_from_slice(&4i32.to_be_bytes());
+        dr.extend_from_slice(&200i32.to_be_bytes()); // b=200
+        buf.extend_from_slice(&make_msg(b'D', &dr));
+
+        buf.extend_from_slice(&make_msg(b'C', b"SELECT 1\0"));
+        buf.extend_from_slice(&make_msg(b'Z', &[b'I']));
+
+        // num_rf=1, format=1 (all columns binary)
+        let bind_fmts = vec![true];
+        let result = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts)).unwrap();
+        assert!(result.contains("100 | 200"), "expected '100 | 200' but got: {result:?}");
+    }
+
+    #[test]
+    fn test_format_detail_with_single_bind_format_all_text() {
+        // num_rf = 1 with format=0 means ALL columns are text.
+        // RowDescription says text (0), Bind says text → no change, everything works.
+        fn make_msg(typ: u8, payload: &[u8]) -> Vec<u8> {
+            let mut msg = vec![typ];
+            msg.extend_from_slice(&((payload.len() as u32 + 4).to_be_bytes()));
+            msg.extend_from_slice(payload);
+            msg
+        }
+
+        let mut buf = make_msg(b'1', &[]);
+        buf.extend_from_slice(&make_msg(b'2', &[]));
+
+        let mut rd = vec![];
+        rd.extend_from_slice(&2i16.to_be_bytes());
+        rd.extend_from_slice(b"a\0");
+        rd.extend_from_slice(&[0u8; 16]);
+        rd.extend_from_slice(&0i16.to_be_bytes());
+        rd.extend_from_slice(b"b\0");
+        rd.extend_from_slice(&[0u8; 16]);
+        rd.extend_from_slice(&0i16.to_be_bytes());
+        buf.extend_from_slice(&make_msg(b'T', &rd));
+
+        let mut dr = vec![];
+        dr.extend_from_slice(&2i16.to_be_bytes());
+        dr.extend_from_slice(&3i32.to_be_bytes());
+        dr.extend_from_slice(b"abc");
+        dr.extend_from_slice(&3i32.to_be_bytes());
+        dr.extend_from_slice(b"def");
+        buf.extend_from_slice(&make_msg(b'D', &dr));
+
+        buf.extend_from_slice(&make_msg(b'C', b"SELECT 2\0"));
+        buf.extend_from_slice(&make_msg(b'Z', &[b'I']));
+
+        let bind_fmts = vec![false]; // num_rf=1, all text
+        let result = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts)).unwrap();
+        assert!(result.contains("abc | def"));
+    }
+
+    #[test]
+    fn test_format_detail_bind_formats_no_row_description() {
+        // Simulate the sqlx flow where RowDescription comes in a previous response
+        // (Parse → Describe → Sync) and only DataRows appear in this buffer
+        // (Bind → Execute → Sync). col_formats stays empty, but bind_formats
+        // should override directly in the DataRow handler.
+        fn make_msg(typ: u8, payload: &[u8]) -> Vec<u8> {
+            let mut msg = vec![typ];
+            msg.extend_from_slice(&((payload.len() as u32 + 4).to_be_bytes()));
+            msg.extend_from_slice(payload);
+            msg
+        }
+
+        let mut buf = make_msg(b'2', &[]); // BindComplete (no RowDescription!)
+
+        // DataRow: col0=binary int4=42, col1=binary int4=99
+        let mut dr = vec![];
+        dr.extend_from_slice(&2i16.to_be_bytes());
+        dr.extend_from_slice(&4i32.to_be_bytes());
+        dr.extend_from_slice(&42i32.to_be_bytes());
+        dr.extend_from_slice(&4i32.to_be_bytes());
+        dr.extend_from_slice(&99i32.to_be_bytes());
+        buf.extend_from_slice(&make_msg(b'D', &dr));
+
+        buf.extend_from_slice(&make_msg(b'C', b"SELECT 1\0"));
+        buf.extend_from_slice(&make_msg(b'Z', &[b'I']));
+
+        // Bind says num_rf=1, format=1 (all binary)
+        let bind_fmts = vec![true];
+        let result = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts)).unwrap();
+        assert!(result.contains("42 | 99"), "expected '42 | 99' but got: {result:?}");
+
+        // Without bind_formats (None), the data would be garbled
+        let without = format_postgres_response_detail(&buf).unwrap();
+        // col_formats is empty → default to text → binary data "" displayed as garbled
+        // Just verify it doesn't crash and produces different output
+        assert_ne!(without, result);
     }
 }
