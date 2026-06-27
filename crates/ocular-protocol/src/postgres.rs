@@ -395,9 +395,14 @@ pub fn format_postgres_response_detail_with_formats(buf: &[u8], bind_formats: Op
 /// 2. Only if the data has non-printable bytes (nulls, control chars), fall
 ///    through to integer/float/timestamp/hex decoding by size.
 fn decode_binary_field(buf: &[u8]) -> String {
+    // Empty text column — PostgreSQL sends length=0 with no payload bytes
+    if buf.is_empty() {
+        return String::new();
+    }
+
     // Step 1: try text. Most PG types use raw UTF-8 for their binary encoding.
     if let Ok(s) = std::str::from_utf8(buf) {
-        if !s.is_empty() && s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+        if s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
             return s.to_string();
         }
     }
