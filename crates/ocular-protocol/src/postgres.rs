@@ -403,7 +403,7 @@ fn decode_binary_field(buf: &[u8]) -> String {
 
     // Step 1: try text. Most PG types use raw UTF-8 for their binary encoding.
     if let Ok(s) = std::str::from_utf8(buf) {
-        if s.chars().all(|c| c.is_ascii_graphic() || c == ' ') {
+        if s.chars().all(|c| !c.is_control() || c == '\t' || c == '\n') {
             return s.to_string();
         }
     }
