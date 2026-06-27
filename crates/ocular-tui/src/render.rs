@@ -675,13 +675,15 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App) {
     // Detail panel
     let detail_focused = app.focus == Focus::Detail;
     let selected_event = filtered.get(app.selected).map(|(_, ev, _)| *ev);
-    let (detail_text, detail_meta): (Text, Line) = if let Some(ev) = selected_event {
+    let (detail_table, detail_cmd, detail_meta): (Text, Text, Line) = if let Some(ev) = selected_event {
         let mut lines: Vec<Line> = Vec::new();
+        let mut formatted_cmd = String::new();
 
         if ev.protocol == ocular_protocol::Protocol::Amqp {
             // AMQP: distinguish Publish (send) vs Deliver (receive) vs request-response
             let is_publish = ev.command.contains("Basic.Publish");
             let is_deliver = ev.command.contains("Basic.Deliver");
+            formatted_cmd = ev.full_command.clone();
             if is_publish {
                 // Extract body from full_command (after "Body: ")
                 let (via, body) = ev.full_command.split_once("\nBody: ")
@@ -699,7 +701,8 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App) {
                 lines.push(Line::from(format!("Via:      {}", ev.full_command)));
             } else {
                 // Normal request-response (e.g. Basic.Get, Queue.Declare)
-                lines.push(Line::from(Span::styled(ev.full_command.clone(), Style::default().fg(Color::Cyan))));
+                formatted_cmd = ev.full_command.clone();
+                lines.push(Line::from(Span::styled(formatted_cmd.clone(), Style::default().fg(Color::Cyan))));
                 if !ev.response_detail.is_empty() {
                     lines.push(Line::from(""));
                     for rd in ev.response_detail.lines() {
@@ -754,27 +757,71 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App) {
         }
         let meta_line = Line::from(meta_parts);
 
-        (Text::from(lines), meta_line)
+        let mut table_lines: Vec<Line> = Vec::new();
+        let mut in_json = false;
+        for rd in ev.response_detail.lines() {
+            if rd == "[Response Body]" || rd == "[Request Body]" {
+                in_json = ev.protocol == ocular_protocol::Protocol::Http;
+                table_lines.push(Line::from(Span::styled(rd.to_string(), Style::default().fg(Color::DarkGray))));
+            } else if rd.starts_with('[') && rd.ends_with(']') {
+                in_json = false;
+                table_lines.push(Line::from(Span::styled(rd.to_string(), Style::default().fg(Color::DarkGray))));
+            } else if in_json {
+                table_lines.push(highlight_json_line(rd));
+            } else {
+                table_lines.push(Line::from(rd.to_string()));
+            }
+        }
+        let mut sql_lines: Vec<Line> = Vec::new();
+        for sql_line in formatted_cmd.lines() {
+            sql_lines.push(highlight_sql_line(sql_line));
+        }
+        (Text::from(table_lines), Text::from(sql_lines), meta_line)
     } else {
-        (Text::from("No events yet. Waiting for traffic..."), Line::from(""))
+        (Text::from(String::new()), Text::from("No events yet. Waiting for traffic..."), Line::from(String::new()))
     };
-    let detail_str_for_scroll: String = detail_text.lines.iter()
+    let detail_text = detail_table;
+    let detail_sql_text = detail_cmd;
+    let detail_border = if detail_focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
+let key_hint = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+let title = if detail_focused {
+    Line::from(vec![
+        Span::raw(" Detail ("),
+        Span::styled("j/k", key_hint), Span::raw(": scroll, "),
+        Span::styled("e", key_hint), Span::raw(": edit, "),
+        Span::styled("esc", key_hint), Span::raw(": back to Events) "),
+    ])
+} else {
+    Line::from(" Detail ")
+};
+let detail_panel_width = right[1].width.saturating_sub(2).max(1) as usize;
+
+    // Build combined text: table (no wrap, on top) + SQL (pre-wrapped, below)
+    let mut combined_lines: Vec<Line> = Vec::new();
+    for rd in detail_text.lines {
+        combined_lines.push(rd.clone());
+    }
+    if !detail_sql_text.lines.is_empty() {
+        combined_lines.push(Line::from(String::new()));
+        for sql_line in detail_sql_text.lines {
+            let text: String = sql_line.spans.iter().map(|s| s.content.as_ref()).collect();
+            if text.len() > detail_panel_width {
+                for chunk in text.as_bytes().chunks(detail_panel_width) {
+                    let wrapped = String::from_utf8_lossy(chunk).to_string();
+                    combined_lines.push(Line::from(wrapped));
+                }
+            } else {
+                combined_lines.push(sql_line.clone());
+            }
+        }
+    }
+    let combined_text = Text::from(combined_lines.clone());
+
+    // Clamp scroll
+    let scroll_text: String = combined_lines.iter()
         .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
         .collect::<Vec<_>>().join("\n");
-    let detail_border = if detail_focused { Style::default().fg(Color::Cyan) } else { Style::default().fg(Color::DarkGray) };
-    let key_hint = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
-    let title = if detail_focused {
-        Line::from(vec![
-            Span::raw(" Detail ("),
-            Span::styled("j/k", key_hint), Span::raw(": scroll, "),
-            Span::styled("e", key_hint), Span::raw(": edit, "),
-            Span::styled("esc", key_hint), Span::raw(": back to Events) "),
-        ])
-    } else {
-        Line::from(" Detail ")
-    };
-    // Clamp scroll (logical lines, no wrapping)
-    let line_count: u16 = detail_str_for_scroll.lines().count().max(1) as u16;
+    let line_count: u16 = scroll_text.lines().count().max(1) as u16;
     let max_scroll = line_count.saturating_sub(1);
     app.detail_scroll = app.detail_scroll.min(max_scroll);
 
@@ -784,7 +831,7 @@ pub(crate) fn ui(f: &mut Frame, app: &mut App) {
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(right[1]);
 
-    let detail_widget = Paragraph::new(detail_text)
+    let detail_widget = Paragraph::new(combined_text)
         .scroll((app.detail_scroll, 0))
         .block(Block::default().borders(Borders::TOP).border_style(detail_border).title(title)
             .padding(ratatui::widgets::Padding::left(1)));
