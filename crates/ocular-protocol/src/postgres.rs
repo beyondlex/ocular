@@ -248,7 +248,7 @@ fn parse_single_response(msg_type: u8, payload: &[u8]) -> Option<String> {
 
 /// Format response detail for the detail panel
 pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
-    format_postgres_response_detail_with_formats(buf, None)
+    format_postgres_response_detail_with_formats(buf, None, None)
 }
 
 /// Same as `format_postgres_response_detail`, but accepts Bind result format codes
@@ -257,7 +257,7 @@ pub fn format_postgres_response_detail(buf: &[u8]) -> Option<String> {
 ///
 /// `bind_formats`: per-column true=binary/false=text. If shorter than column count,
 /// remaining columns default to false (text). If Some(empty), all columns are text.
-pub fn format_postgres_response_detail_with_formats(buf: &[u8], bind_formats: Option<&[bool]>) -> Option<String> {
+pub fn format_postgres_response_detail_with_formats(buf: &[u8], bind_formats: Option<&[bool]>, col_type_oids: Option<&[u32]>) -> Option<String> {
         if buf.is_empty() { return None; }
     // SSL response
     if buf.len() == 1 {
@@ -355,7 +355,8 @@ pub fn format_postgres_response_detail_with_formats(buf: &[u8], bind_formats: Op
                                         col_formats.get(i).copied().unwrap_or(false)
                                     };
                                     if is_binary {
-                                        fields.push(decode_binary_field(&payload[p..end]));
+                                        let type_oid = col_type_oids.and_then(|oids| oids.get(i).copied());
+                                        fields.push(decode_typed_binary_field(&payload[p..end], type_oid));
                                     } else {
                                         fields.push(String::from_utf8_lossy(&payload[p..end]).to_string());
                                     }
@@ -440,6 +441,110 @@ fn decode_binary_field(buf: &[u8]) -> String {
             format!("<hex: {}>", hex)
         }
     }
+}
+
+/// Decode a binary field with optional PG type OID for type-aware formatting.
+/// Falls back to `decode_binary_field` when the type is unknown or doesn't
+/// need special handling.
+fn decode_typed_binary_field(buf: &[u8], type_oid: Option<u32>) -> String {
+    match type_oid {
+        Some(1114) | Some(1184) => {
+            // TIMESTAMP(1114) / TIMESTAMPTZ(1184): int64 microseconds since 2000-01-01
+            if buf.len() == 8 {
+                format_pg_timestamp(i64::from_be_bytes([
+                    buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
+                ]))
+            } else {
+                decode_binary_field(buf)
+            }
+        }
+        Some(16) if buf.len() == 1 => {
+            // BOOL(16): 1 byte, 0=false, 1=true
+            match buf[0] {
+                0 => "false".to_string(),
+                1 => "true".to_string(),
+                _ => buf[0].to_string(),
+            }
+        }
+        _ => decode_binary_field(buf),
+    }
+}
+
+/// Format a PostgreSQL timestamp (int64 microseconds since 2000-01-01 UTC)
+/// as ISO 8601 "YYYY-MM-DD HH:MM:SS".
+fn format_pg_timestamp(micros: i64) -> String {
+    // PostgreSQL epoch: 2000-01-01 = Unix seconds 946684800
+    let total_secs = micros / 1_000_000;
+    let micro_remainder = (micros % 1_000_000).unsigned_abs();
+    let unix_secs = total_secs + 946684800;
+
+    let mut days = unix_secs / 86400;
+    let day_secs = unix_secs % 86400;
+    if unix_secs < 0 && day_secs != 0 {
+        days -= 1;
+    }
+
+    let h = (day_secs / 3600) as u8;
+    let m = ((day_secs % 3600) / 60) as u8;
+    let s = (day_secs % 60) as u8;
+
+    // Civil date from days since epoch (Howard Hinnant algorithm)
+    // Unix epoch 1970-01-01 = days_since_0000_03_01 = 719468
+    let z = days + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i32 + era as i32 * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+
+    if micro_remainder == 0 {
+        format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", year, month, d, h, m, s)
+    } else {
+        format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:06}", year, month, d, h, m, s, micro_remainder)
+    }
+}
+
+/// Scan a PostgreSQL response buffer for the first RowDescription ('T') message
+/// and extract per-column type OIDs. Returns None if no RowDescription is found.
+pub fn extract_postgres_type_oids(buf: &[u8]) -> Option<Vec<u32>> {
+    let mut pos = 0;
+    while pos + 5 <= buf.len() {
+        let msg_type = buf[pos];
+        let len = u32::from_be_bytes([buf[pos + 1], buf[pos + 2], buf[pos + 3], buf[pos + 4]]) as usize;
+        if pos + 1 + len > buf.len() {
+            break;
+        }
+        if msg_type == b'T' {
+            let payload = &buf[pos + 5..pos + 1 + len];
+            if payload.len() < 2 {
+                return None;
+            }
+            let col_count = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+            let mut p = 2;
+            let mut oids = Vec::with_capacity(col_count);
+            for _ in 0..col_count {
+                let name = read_cstr(&payload[p..]);
+                p += name.len() + 1;
+                if p + 18 <= payload.len() {
+                    let type_oid = u32::from_be_bytes([payload[p + 6], payload[p + 7], payload[p + 8], payload[p + 9]]);
+                    oids.push(type_oid);
+                    p += 18;
+                } else {
+                    break;
+                }
+            }
+            if oids.len() == col_count {
+                return Some(oids);
+            }
+            return None;
+        }
+        pos += 1 + len;
+    }
+    None
 }
 
 /// Attempt to decode a PostgreSQL NUMERIC binary value.
@@ -1086,7 +1191,7 @@ mod tests {
 
         // WITH bind_formats (col0=binary, col1=text) → column 0 decoded as "42"
         let bind_fmts = vec![true, false];
-        let with = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts)).unwrap();
+        let with = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts), None).unwrap();
         assert!(with.contains("Columns: id | name"));
         assert!(with.contains("42 | hello"), "expected '42 | hello' but got: {with:?}");
         assert!(with.contains("1 rows"));
@@ -1131,7 +1236,7 @@ mod tests {
 
         // num_rf=1, format=1 (all columns binary)
         let bind_fmts = vec![true];
-        let result = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts)).unwrap();
+        let result = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts), None).unwrap();
         assert!(result.contains("100 | 200"), "expected '100 | 200' but got: {result:?}");
     }
 
@@ -1171,7 +1276,7 @@ mod tests {
         buf.extend_from_slice(&make_msg(b'Z', &[b'I']));
 
         let bind_fmts = vec![false]; // num_rf=1, all text
-        let result = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts)).unwrap();
+        let result = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts), None).unwrap();
         assert!(result.contains("abc | def"));
     }
 
@@ -1204,7 +1309,7 @@ mod tests {
 
         // Bind says num_rf=1, format=1 (all binary)
         let bind_fmts = vec![true];
-        let result = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts)).unwrap();
+        let result = format_postgres_response_detail_with_formats(&buf, Some(&bind_fmts), None).unwrap();
         assert!(result.contains("42 | 99"), "expected '42 | 99' but got: {result:?}");
 
         // Without bind_formats (None), the data would be garbled
@@ -1266,5 +1371,40 @@ mod tests {
         buf5.extend_from_slice(&0i16.to_be_bytes());
         buf5.extend_from_slice(&0i16.to_be_bytes());
         assert!(try_decode_numeric(&buf5).is_none());
+    }
+
+    #[test]
+    fn test_format_pg_timestamp() {
+        // 0 microseconds since PG epoch (2000-01-01) → "2000-01-01 00:00:00"
+        assert_eq!(format_pg_timestamp(0), "2000-01-01 00:00:00");
+
+        // 2026-06-27 09:28:00 UTC = 835867680000000 microseconds since PG epoch
+        let ts = 835867680_000_000i64;
+        let result = format_pg_timestamp(ts);
+        assert!(result.starts_with("2026-06-27 09:28:00"),
+            "expected 2026-06-27 09:28:00 but got: {result}");
+
+        // Negative: 1999-12-31 23:59:59 = -1 second = -1000000 microseconds
+        assert_eq!(format_pg_timestamp(-1_000_000), "1999-12-31 23:59:59");
+
+        // 100_000_000 micros = 100 seconds → 2000-01-01 00:01:40
+        assert_eq!(format_pg_timestamp(100_000_000), "2000-01-01 00:01:40");
+    }
+
+    #[test]
+    fn test_decode_typed_binary_field_timestamp() {
+        let micros: i64 = 835867680_000_000i64;
+        let mut buf = vec![];
+        buf.extend_from_slice(&micros.to_be_bytes());
+
+        // With TIMESTAMP OID (1114) → formatted as date
+        let result = decode_typed_binary_field(&buf, Some(1114));
+        assert!(result.starts_with("2026-06-27"),
+            "timestamp with OID 1114 should be formatted, got: {result}");
+
+        // Without OID → falls back to raw int64
+        let raw = decode_typed_binary_field(&buf, None);
+        assert_eq!(raw, micros.to_string(),
+            "without OID should show raw int64, got: {raw}");
     }
 }

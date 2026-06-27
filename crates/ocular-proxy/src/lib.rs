@@ -194,11 +194,14 @@ impl ReqBufMgr {
 /// completeness checks, and event emission.
 struct RespBufMgr {
     buf: Vec<u8>,
+    /// Column type OIDs captured from RowDescription (Describe response).
+    /// Used to decode binary fields that need type info (timestamps, bools, etc.).
+    col_type_oids: Option<Vec<u32>>,
 }
 
 impl RespBufMgr {
     fn new() -> Self {
-        Self { buf: Vec::with_capacity(4096) }
+        Self { buf: Vec::with_capacity(4096), col_type_oids: None }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -227,7 +230,11 @@ impl RespBufMgr {
                 };
                 let response = parse_response(protocol, parse_buf).unwrap_or_default();
                 let response_detail = if protocol == Protocol::Postgres {
-                    format_postgres_response_detail_with_formats(parse_buf, req.result_formats.as_deref())
+                    // Capture/update type OIDs from RowDescription when present
+                    if let Some(oids) = ocular_protocol::postgres::extract_postgres_type_oids(parse_buf) {
+                        self.col_type_oids = Some(oids);
+                    }
+                    format_postgres_response_detail_with_formats(parse_buf, req.result_formats.as_deref(), self.col_type_oids.as_deref())
                         .unwrap_or_else(|| response.clone())
                 } else {
                     format_response_detail(protocol, parse_buf)
